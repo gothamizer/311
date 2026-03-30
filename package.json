@@ -1,5 +1,5 @@
 {
-  "name": "dashboard311-vite",
+  "name": "nyc311-anomaly-desk",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,8 +10,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-sans": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
+    "@types/d3-geo": "^3.1.0",
+    "d3-geo": "^3.1.1",
+    "framer-motion": "^12.38.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.13.2",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
