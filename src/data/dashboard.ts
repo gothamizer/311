@@ -16,7 +16,8 @@ import type {
 } from '../types'
 
 const TODAY = new Date('2026-03-30T12:00:00-04:00')
-const START = new Date('2020-01-01T12:00:00-05:00')
+const ANALYTICS_START = new Date('2024-01-01T12:00:00-05:00')
+const HISTORY_START = new Date('2020-01-01T12:00:00-05:00')
 
 const HORIZONS: Horizon[] = ['today', '7d', '30d', 'quarter', 'year']
 
@@ -707,16 +708,16 @@ function getWindowDays(horizon: Horizon) {
   return Math.max(1, Math.round((TODAY.getTime() - new Date(TODAY.getFullYear(), 0, 1).getTime()) / 86400000) + 1)
 }
 
-function createTimeline(blueprint: Blueprint) {
+function createAnalyticsTimeline(blueprint: Blueprint) {
   const random = createRandom(`${blueprint.id}-timeline`)
   const direction = blueprint.direction === 'down' ? -1 : 1
-  const totalDays = Math.round((TODAY.getTime() - START.getTime()) / 86400000) + 1
+  const totalDays = Math.round((TODAY.getTime() - ANALYTICS_START.getTime()) / 86400000) + 1
   const points: DailyPoint[] = []
   const quarterStartIso = toIsoDate(getStartOfQuarter(TODAY))
   const yearStartIso = `${TODAY.getFullYear()}-01-01`
 
   for (let dayIndex = 0; dayIndex < totalDays; dayIndex += 1) {
-    const date = addDays(START, dayIndex)
+    const date = addDays(ANALYTICS_START, dayIndex)
     const isoDate = toIsoDate(date)
     const annualPhase = Math.sin((getDayOfYear(date) / 365) * Math.PI * 2 + random())
     const trend = 1 + dayIndex / totalDays / 7
@@ -767,6 +768,41 @@ function createTimeline(blueprint: Blueprint) {
 
     points.push({
       actual,
+      date: isoDate,
+      expected,
+    })
+  }
+
+  return points
+}
+
+function createHistoryLead(blueprint: Blueprint) {
+  const totalDays = Math.round((ANALYTICS_START.getTime() - HISTORY_START.getTime()) / 86400000)
+
+  if (totalDays <= 0) {
+    return []
+  }
+
+  const random = createRandom(`${blueprint.id}-history`)
+  const directionBias = blueprint.direction === 'down' ? -1 : 1
+  const points: DailyPoint[] = []
+
+  for (let dayIndex = 0; dayIndex < totalDays; dayIndex += 1) {
+    const date = addDays(HISTORY_START, dayIndex)
+    const isoDate = toIsoDate(date)
+    const annualPhase = Math.sin((getDayOfYear(date) / 365) * Math.PI * 2 + random() * 0.6)
+    const slowCycle = Math.sin((dayIndex / Math.max(1, totalDays)) * Math.PI * 5 + random())
+    const expected =
+      blueprint.base *
+      (0.92 + dayIndex / Math.max(1, totalDays) / 8.5) *
+      WEEKLY_PATTERN[date.getDay()] *
+      (1 + annualPhase * 0.11)
+    const historicalDrift =
+      1 + slowCycle * 0.06 + directionBias * Math.sin((dayIndex / 240) * Math.PI) * 0.015
+    const noise = 0.94 + random() * 0.12
+
+    points.push({
+      actual: Math.max(0, Math.round(expected * historicalDrift * noise)),
       date: isoDate,
       expected,
     })
@@ -1019,8 +1055,9 @@ function createQueueReason(blueprint: Blueprint, dominantScore: number) {
 
 function createAlertRecord(blueprint: Blueprint): AlertRecord {
   const geography = getGeography(blueprint.geographyId)
-  const timeline = createTimeline(blueprint)
-  const aggregateWindow = aggregate(timeline, blueprint.horizon)
+  const analyticsTimeline = createAnalyticsTimeline(blueprint)
+  const timeline = [...createHistoryLead(blueprint), ...analyticsTimeline]
+  const aggregateWindow = aggregate(analyticsTimeline, blueprint.horizon)
   const deltaPct =
     ((aggregateWindow.actual - aggregateWindow.expected) / Math.max(1, aggregateWindow.expected)) *
     100
@@ -1064,7 +1101,7 @@ function createAlertRecord(blueprint: Blueprint): AlertRecord {
     queueReason: createQueueReason(blueprint, horizonScores[blueprint.horizon]),
     secondarySignals: blueprint.secondarySignals ?? [],
     signal,
-    sparkline: createSparkline(timeline),
+    sparkline: createSparkline(analyticsTimeline),
     summary: blueprint.summary,
     surfaceLevel: blueprint.surfaceLevel ?? (blueprint.detail ? 'detail' : 'problem'),
     tags: blueprint.tags ?? [],
@@ -1114,7 +1151,8 @@ function createQuietEntity(problem: string, detail?: string): EntityRecord {
     summary: '',
   }
 
-  const timeline = createTimeline(quietBlueprint)
+  const analyticsTimeline = createAnalyticsTimeline(quietBlueprint)
+  const timeline = [...createHistoryLead(quietBlueprint), ...analyticsTimeline]
   const horizonScores = {
     today: Number((1.8 + random() * 0.9).toFixed(1)),
     '7d': Number((2.1 + random() * 1.0).toFixed(1)),
@@ -1162,7 +1200,7 @@ function createQuietEntity(problem: string, detail?: string): EntityRecord {
     map,
     name: detail ?? problem,
     parentProblem: detail ? problem : undefined,
-    sparkline: createSparkline(timeline),
+    sparkline: createSparkline(analyticsTimeline),
     summary: `Currently quiet. The highest residual watch is on the ${defaultHorizon} horizon, but it stays below queue threshold.`,
     timeline,
     type: detail ? 'detail' : 'problem',
