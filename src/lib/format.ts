@@ -92,6 +92,7 @@ export function compactSummary(summary: string, horizon: Horizon) {
       /^The (last month|last 30 days|month-like window)\s+/i,
       '30-day volume ',
     )
+    compact = compact.replace(/^30-day volume have\b/i, '30-day volume has')
     return sentenceCase(compact)
   }
 
