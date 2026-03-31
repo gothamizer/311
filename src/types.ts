@@ -1,5 +1,6 @@
 export type Horizon = 'today' | '7d' | '30d' | 'quarter' | 'year'
 export type ChartHorizon = '7d' | '30d' | 'quarter' | 'year' | 'full'
+export type ChartSmoothness = 'raw' | '3pt' | '7pt'
 
 export type PaneKey = 'main' | '7d' | '30d' | 'quarter' | 'year'
 
@@ -57,33 +58,37 @@ export interface SignalBreakdown {
   specificity: number
 }
 
-export interface AlertRecord {
+export interface AlertSummary {
   actual: number
   artifacts: ArtifactFlag[]
-  comparabilityStart: string
-  contributors: Contributor[]
   deltaPct: number
+  detail?: string
   direction: Direction
   expected: number
   geography: Geography
   horizon: Horizon
   horizonScores: Record<Horizon, number>
   id: string
-  map: DistrictDatum[]
   priority: number
   problem: string
   projectedPercentile?: number
-  queueReason: string
-  secondarySignals: string[]
-  signal: SignalBreakdown
   sparkline: number[]
   summary: string
   surfaceLevel: SurfaceLevel
+  title: string
+}
+
+export interface AlertRecord extends AlertSummary {
+  comparabilityStart: string
+  contributors: Contributor[]
+  historyTimeline: DailyPoint[]
+  map: DistrictDatum[]
+  queueReason: string
+  secondarySignals: string[]
+  signal: SignalBreakdown
   tags: string[]
   timeline: DailyPoint[]
-  title: string
   whyItMatters: string
-  detail?: string
 }
 
 export interface GeographyScore {
@@ -95,32 +100,36 @@ export interface GeographyScore {
   status: StatusTone
 }
 
-export interface EntityRecord {
+export interface EntitySummary {
   activeAlertCount: number
-  artifacts: ArtifactFlag[]
-  contributors: Contributor[]
   currentStatus: StatusTone
   defaultHorizon: Horizon
-  geographyBreakdown: GeographyScore[]
   horizonScores: Record<Horizon, number>
   id: string
-  map: DistrictDatum[]
   name: string
   parentProblem?: string
   sparkline: number[]
   summary: string
-  timeline: DailyPoint[]
   topAlertId?: string
   type: SurfaceLevel
 }
 
+export interface EntityRecord extends EntitySummary {
+  artifacts: ArtifactFlag[]
+  contributors: Contributor[]
+  geographyBreakdown: GeographyScore[]
+  historyTimeline: DailyPoint[]
+  map: DistrictDatum[]
+  timeline: DailyPoint[]
+}
+
 export interface DashboardData {
-  allAlerts: AlertRecord[]
-  entities: EntityRecord[]
-  fixedHorizon: Record<Exclude<PaneKey, 'main'>, AlertRecord[]>
+  allAlerts: AlertSummary[]
+  entities: EntitySummary[]
+  fixedHorizon: Record<Exclude<PaneKey, 'main'>, AlertSummary[]>
   generatedAt: string
   lastRefresh: string
-  mainQueue: AlertRecord[]
+  mainQueue: AlertSummary[]
   metrics: {
     activeAlerts: number
     boardAlerts: number

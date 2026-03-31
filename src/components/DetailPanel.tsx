@@ -8,7 +8,13 @@ import {
   formatHorizonLabel,
   formatPercentile,
 } from '../lib/format'
-import type { AlertRecord, ChartHorizon, Contributor, EntityRecord } from '../types'
+import type {
+  AlertRecord,
+  ChartHorizon,
+  ChartSmoothness,
+  Contributor,
+  EntityRecord,
+} from '../types'
 import { DistrictMap } from './DistrictMap'
 import { TrendChart } from './TrendChart'
 
@@ -29,6 +35,7 @@ interface DetailPanelProps {
 }
 
 const STACK_PERIODS_STORAGE_KEY = 'dashboard:stack-periods'
+const CHART_SMOOTHNESS_STORAGE_KEY = 'dashboard:chart-smoothness'
 
 function getDefaultChartHorizon(baseHorizon: AlertRecord['horizon'] | EntityRecord['defaultHorizon']): ChartHorizon {
   return baseHorizon === 'today' ? '7d' : baseHorizon
@@ -47,6 +54,20 @@ function readStoredStackPeriods() {
 
   if (raw === 'false') {
     return false
+  }
+
+  return undefined
+}
+
+function readStoredSmoothness(): ChartSmoothness | undefined {
+  if (typeof window === 'undefined') {
+    return undefined
+  }
+
+  const raw = window.localStorage.getItem(CHART_SMOOTHNESS_STORAGE_KEY)
+
+  if (raw === 'raw' || raw === '3pt' || raw === '7pt') {
+    return raw
   }
 
   return undefined
@@ -98,6 +119,9 @@ export function DetailPanel({
 
     return defaultChartHorizon === 'quarter' || defaultChartHorizon === 'year'
   })
+  const [chartSmoothness, setChartSmoothness] = useState<ChartSmoothness>(
+    () => readStoredSmoothness() ?? 'raw',
+  )
   const title =
     selection.kind === 'alert'
       ? selection.alert.title
@@ -110,6 +134,7 @@ export function DetailPanel({
       : entity?.parentProblem
   const direction = alert?.direction ?? 'up'
   const timeline = alert?.timeline ?? entity?.timeline ?? []
+  const historyTimeline = alert?.historyTimeline ?? entity?.historyTimeline ?? []
   const map = alert?.map ?? entity?.map ?? []
   const contributors: Contributor[] = alert?.contributors ?? entity?.contributors ?? []
   const activeArtifacts =
@@ -125,6 +150,14 @@ export function DetailPanel({
     window.localStorage.setItem(STACK_PERIODS_STORAGE_KEY, String(stackPeriods))
   }, [stackPeriods])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(CHART_SMOOTHNESS_STORAGE_KEY, chartSmoothness)
+  }, [chartSmoothness])
+
   return (
     <AnimatePresence mode="wait">
       <motion.section
@@ -136,144 +169,173 @@ export function DetailPanel({
         transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
       >
         <div className="detail-panel__headline">
-          <div>
-            <p className="detail-panel__breadcrumb">
-              {selection.kind === 'alert'
-                ? selection.alert.geography.label
-                : parentLabel
-                  ? `${parentLabel} / ${title}`
-                  : title}
-            </p>
+          <div className="detail-panel__headline-copy">
             <div className="detail-panel__title-row">
               <h2>{title}</h2>
-              <span className={`detail-panel__status detail-panel__status--${selection.kind === 'alert' ? selection.alert.direction : selection.entity.currentStatus}`}>
+              <p className="detail-panel__breadcrumb">
                 {selection.kind === 'alert'
-                  ? 'Active'
-                  : selection.entity.currentStatus === 'active'
+                  ? selection.alert.geography.label
+                  : parentLabel ?? 'Category'}
+              </p>
+              {selection.kind === 'entity' ? (
+                <span className={`detail-panel__status detail-panel__status--${selection.entity.currentStatus}`}>
+                  {selection.entity.currentStatus === 'active'
                     ? 'Active'
                     : selection.entity.currentStatus === 'watch'
                       ? 'Watch'
                       : 'Quiet'}
-              </span>
+                </span>
+              ) : null}
             </div>
             <p className="detail-panel__summary">
               {selection.kind === 'alert'
                 ? compactSummary(selection.alert.summary, selection.alert.horizon)
                 : selection.entity.summary}
             </p>
+
+            {selection.kind === 'entity' && selection.entity.topAlertId ? (
+              <button
+                className="detail-panel__action"
+                type="button"
+                onClick={() => onJumpToAlert(selection.entity.topAlertId!)}
+              >
+                Jump to active alert
+              </button>
+            ) : null}
           </div>
 
-          {selection.kind === 'entity' && selection.entity.topAlertId ? (
-            <button
-              className="detail-panel__action"
-              type="button"
-              onClick={() => onJumpToAlert(selection.entity.topAlertId!)}
-            >
-              Jump to active alert
-            </button>
-          ) : null}
-        </div>
-
-        <div className="detail-panel__metric-strip detail-panel__metric-strip--flat">
-          {selection.kind === 'alert' ? (
-            <>
-              <div>
-                <p className="metric-label">Alert</p>
-                <p className="metric-figure">{formatHorizonLabel(selection.alert.horizon)}</p>
-              </div>
-              <div>
-                <p className="metric-label">Actual</p>
-                <p className="metric-figure">{formatCount(selection.alert.actual)}</p>
-              </div>
-              <div>
-                <p className="metric-label">Expected</p>
-                <p className="metric-figure">{formatCount(selection.alert.expected)}</p>
-              </div>
-              <div>
-                <p className="metric-label">Deviation</p>
-                <p className="metric-figure">{formatDelta(selection.alert.deltaPct)}</p>
-              </div>
-              <div>
-                <p className="metric-label">Priority</p>
-                <p className="metric-figure">{selection.alert.priority}</p>
-              </div>
-              <div>
-                <p className="metric-label">Historic rank</p>
-                <p className="metric-figure">
-                  {selection.alert.projectedPercentile
-                    ? formatPercentile(selection.alert.projectedPercentile)
-                    : 'n/a'}
-                </p>
-              </div>
-            </>
-          ) : (
-            <>
-              <div>
-                <p className="metric-label">Current status</p>
-                <p className="metric-figure">
-                  {selection.entity.currentStatus === 'active'
-                    ? 'Active'
-                    : selection.entity.currentStatus === 'watch'
-                      ? 'Watch'
-                      : 'Quiet'}
-                </p>
-              </div>
-              <div>
-                <p className="metric-label">Active geographies</p>
-                <p className="metric-figure">{selection.entity.activeAlertCount}</p>
-              </div>
-              <div>
-                <p className="metric-label">Dominant horizon</p>
-                <p className="metric-figure">
-                  {formatHorizonLabel(baseHorizon)}
-                </p>
-              </div>
-              <div>
-                <p className="metric-label">Strongest score</p>
-                <p className="metric-figure">
-                  {selection.entity.horizonScores[baseHorizon].toFixed(1)}
-                </p>
-              </div>
-            </>
-          )}
+          <div
+            className={`detail-panel__metric-strip ${
+              selection.kind === 'alert'
+                ? 'detail-panel__metric-strip--alert'
+                : 'detail-panel__metric-strip--entity'
+            }`}
+          >
+            {selection.kind === 'alert' ? (
+              <>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Alert</p>
+                  <p className="metric-figure">{formatHorizonLabel(selection.alert.horizon)}</p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Actual</p>
+                  <p className="metric-figure">{formatCount(selection.alert.actual)}</p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Expected</p>
+                  <p className="metric-figure">{formatCount(selection.alert.expected)}</p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Deviation</p>
+                  <p className="metric-figure">{formatDelta(selection.alert.deltaPct)}</p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Priority</p>
+                  <p className="metric-figure">{selection.alert.priority}</p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Historic rank</p>
+                  <p className="metric-figure">
+                    {selection.alert.projectedPercentile
+                      ? formatPercentile(selection.alert.projectedPercentile)
+                      : 'n/a'}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Current status</p>
+                  <p className="metric-figure">
+                    {selection.entity.currentStatus === 'active'
+                      ? 'Active'
+                      : selection.entity.currentStatus === 'watch'
+                        ? 'Watch'
+                        : 'Quiet'}
+                  </p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Active geographies</p>
+                  <p className="metric-figure">{selection.entity.activeAlertCount}</p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Dominant horizon</p>
+                  <p className="metric-figure">
+                    {formatHorizonLabel(baseHorizon)}
+                  </p>
+                </div>
+                <div className="detail-panel__metric-card">
+                  <p className="metric-label">Strongest score</p>
+                  <p className="metric-figure">
+                    {selection.entity.horizonScores[baseHorizon].toFixed(1)}
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="detail-panel__controls">
-          <div className="control-group__buttons">
-            {([
-              ['7d', '7D'],
-              ['30d', '30D'],
-              ['quarter', '90D'],
-              ['year', '12M'],
-              ['full', 'History'],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                className={`chart-control ${chartHorizon === value ? 'is-active' : ''}`}
-                type="button"
-                onClick={() => setChartHorizon(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <div className="detail-panel__controls-row">
+            <div className="detail-panel__control-group detail-panel__control-group--inline">
+              <span className="detail-panel__control-label">Timeframe</span>
+              {([
+                ['7d', '7D'],
+                ['30d', '30D'],
+                ['quarter', 'Quarter'],
+                ['year', 'Year'],
+                ['full', 'History'],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  className={`chart-control ${chartHorizon === value ? 'is-active' : ''}`}
+                  type="button"
+                  onClick={() => setChartHorizon(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
 
-          {chartHorizon !== 'full' ? (
-            <label className="chart-checkbox">
-              <input
-                checked={stackPeriods}
-                type="checkbox"
-                onChange={(event) => setStackPeriods(event.target.checked)}
-              />
-              <span>Stack periods</span>
-            </label>
-          ) : null}
+            <div className="detail-panel__control-group detail-panel__control-group--inline">
+              <span className="detail-panel__control-label">Smoothness</span>
+              {([
+                ['raw', 'Raw'],
+                ['3pt', '3pt'],
+                ['7pt', '7pt'],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  className={`chart-control ${chartSmoothness === value ? 'is-active' : ''}`}
+                  type="button"
+                  onClick={() => setChartSmoothness(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {chartHorizon !== 'full' ? (
+              <div className="detail-panel__control-group detail-panel__control-group--inline">
+                <label className="stack-toggle">
+                  <input
+                    checked={stackPeriods}
+                    type="checkbox"
+                    onChange={(event) => setStackPeriods(event.target.checked)}
+                  />
+                  <span>Stack prior periods</span>
+                </label>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <TrendChart
           direction={direction === 'up' ? 'up' : 'down'}
+          historyPoints={historyTimeline}
           horizon={chartHorizon}
           points={timeline}
+          smoothness={chartSmoothness}
           stackPeriods={stackPeriods && chartHorizon !== 'full'}
         />
 

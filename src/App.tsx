@@ -1,4 +1,4 @@
-import { startTransition, useDeferredValue, useMemo, useState } from 'react'
+import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { LayoutGroup, motion } from 'framer-motion'
 import {
   BrowserRouter,
@@ -11,7 +11,11 @@ import {
 
 import { DetailPanel } from './components/DetailPanel'
 import { Sparkline } from './components/Sparkline'
-import { dashboardData } from './data/dashboard'
+import {
+  fetchAlertDetail,
+  fetchDashboardIndex,
+  fetchEntityDetail,
+} from './data/dashboard'
 import {
   compactSummary,
   formatCount,
@@ -19,14 +23,21 @@ import {
   formatFullDate,
   formatHorizonLabel,
 } from './lib/format'
-import type { AlertRecord, EntityRecord, PaneKey } from './types'
+import type {
+  AlertRecord,
+  AlertSummary,
+  DashboardData,
+  EntityRecord,
+  EntitySummary,
+  PaneKey,
+} from './types'
 
 const PANE_META: Array<{ key: PaneKey; label: string }> = [
   { key: 'main', label: 'Queue' },
   { key: '7d', label: '7D' },
   { key: '30d', label: '30D' },
-  { key: 'quarter', label: '90D' },
-  { key: 'year', label: '12M' },
+  { key: 'quarter', label: 'Quarter' },
+  { key: 'year', label: 'Year' },
 ]
 
 function SearchIcon() {
@@ -43,7 +54,7 @@ function QueueRow({
   selected,
   onSelect,
 }: {
-  alert: AlertRecord
+  alert: AlertSummary
   onSelect: (alertId: string) => void
   selected: boolean
 }) {
@@ -95,7 +106,7 @@ function ExplorerRow({
   selected,
   onSelect,
 }: {
-  entity: EntityRecord
+  entity: EntitySummary
   onSelect: (entityId: string) => void
   selected: boolean
 }) {
@@ -124,32 +135,142 @@ function ExplorerRow({
   )
 }
 
-function DashboardWorkspace() {
+function DetailLoading({
+  error,
+  title,
+}: {
+  error?: string
+  title: string
+}) {
+  return (
+    <section className="detail-panel">
+      <div className="detail-panel__headline">
+        <div>
+          <p className="detail-panel__breadcrumb">Loading</p>
+          <div className="detail-panel__title-row">
+            <h2>{title}</h2>
+          </div>
+          <p className="detail-panel__summary">
+            {error ?? 'Loading detail payload from the generated dashboard dataset.'}
+          </p>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function DashboardWorkspace({
+  dashboardData,
+}: {
+  dashboardData: DashboardData
+}) {
   const navigate = useNavigate()
   const params = useParams<{ alertId?: string; entityId?: string }>()
   const [activePane, setActivePane] = useState<PaneKey>('main')
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
+  const [alertDetails, setAlertDetails] = useState<Record<string, AlertRecord>>({})
+  const [entityDetails, setEntityDetails] = useState<Record<string, EntityRecord>>({})
+  const [detailError, setDetailError] = useState<string>()
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
 
   const activeRows =
     activePane === 'main'
-      ? dashboardData.mainQueue
+      ? dashboardData.allAlerts
       : dashboardData.fixedHorizon[activePane]
 
-  const selectedAlert = params.alertId
+  const selectedAlertSummary = params.alertId
     ? dashboardData.allAlerts.find((alert) => alert.id === params.alertId)
     : undefined
-  const selectedEntity = params.entityId
+  const selectedEntitySummary = params.entityId
     ? dashboardData.entities.find((entity) => entity.id === params.entityId)
     : undefined
-  const topAlert =
-    selectedEntity?.topAlertId
-      ? dashboardData.allAlerts.find((alert) => alert.id === selectedEntity.topAlertId)
+  const selectedEntity = selectedEntitySummary
+    ? entityDetails[selectedEntitySummary.id]
+    : undefined
+  const topAlertSummary =
+    selectedEntitySummary?.topAlertId
+      ? dashboardData.allAlerts.find((alert) => alert.id === selectedEntitySummary.topAlertId)
       : undefined
-  const fallbackAlert = activeRows[0] ?? dashboardData.mainQueue[0]
-  const currentAlert = selectedAlert ?? fallbackAlert
-  const showExplorer = Boolean(selectedEntity) || Boolean(deferredQuery)
+  const topAlert = topAlertSummary ? alertDetails[topAlertSummary.id] : undefined
+  const fallbackAlertSummary = activeRows[0] ?? dashboardData.mainQueue[0]
+  const currentAlertSummary = selectedAlertSummary ?? fallbackAlertSummary
+  const currentAlert = currentAlertSummary ? alertDetails[currentAlertSummary.id] : undefined
+  const showExplorer = Boolean(selectedEntitySummary) || Boolean(deferredQuery)
+
+  useEffect(() => {
+    const targetAlertId = currentAlertSummary?.id
+
+    if (!targetAlertId || alertDetails[targetAlertId]) {
+      return
+    }
+
+    let cancelled = false
+
+    fetchAlertDetail(targetAlertId)
+      .then((detail) => {
+        if (!cancelled) {
+          setAlertDetails((current) => ({ ...current, [detail.id]: detail }))
+        }
+      })
+      .catch((error: Error) => {
+        if (!cancelled) {
+          setDetailError(error.message)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [alertDetails, currentAlertSummary])
+
+  useEffect(() => {
+    const targetEntityId = selectedEntitySummary?.id
+
+    if (!targetEntityId || entityDetails[targetEntityId]) {
+      return
+    }
+
+    let cancelled = false
+
+    fetchEntityDetail(targetEntityId)
+      .then((detail) => {
+        if (!cancelled) {
+          setEntityDetails((current) => ({ ...current, [detail.id]: detail }))
+        }
+      })
+      .catch((error: Error) => {
+        if (!cancelled) {
+          setDetailError(error.message)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [entityDetails, selectedEntitySummary])
+
+  useEffect(() => {
+    const targetAlertId = selectedEntitySummary?.topAlertId
+
+    if (!targetAlertId || alertDetails[targetAlertId]) {
+      return
+    }
+
+    let cancelled = false
+
+    fetchAlertDetail(targetAlertId)
+      .then((detail) => {
+        if (!cancelled) {
+          setAlertDetails((current) => ({ ...current, [detail.id]: detail }))
+        }
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [alertDetails, selectedEntitySummary])
 
   function openAlert(alertId: string) {
     setQuery('')
@@ -167,10 +288,10 @@ function DashboardWorkspace() {
 
     const nextRows =
       nextPane === 'main'
-        ? dashboardData.mainQueue
+        ? dashboardData.allAlerts
         : dashboardData.fixedHorizon[nextPane]
 
-    if (!selectedAlert || !nextRows.some((row) => row.id === selectedAlert.id)) {
+    if (!selectedAlertSummary || !nextRows.some((row) => row.id === selectedAlertSummary.id)) {
       const nextAlert = nextRows[0]
 
       if (nextAlert) {
@@ -182,19 +303,22 @@ function DashboardWorkspace() {
   function returnToQueue() {
     setQuery('')
     setSearchOpen(false)
-    navigate(`/alerts/${(selectedAlert ?? fallbackAlert).id}`)
+
+    if (currentAlertSummary) {
+      navigate(`/alerts/${currentAlertSummary.id}`)
+    }
   }
 
   const explorerResults = useMemo(() => {
-    const seededResults = selectedEntity
+    const seededResults = selectedEntitySummary
       ? [
-          selectedEntity,
-          ...dashboardData.entities.filter((entity) => entity.id !== selectedEntity.id),
+          selectedEntitySummary,
+          ...dashboardData.entities.filter((entity) => entity.id !== selectedEntitySummary.id),
         ]
       : dashboardData.entities
 
     if (!deferredQuery) {
-      return seededResults.slice(0, 18)
+      return seededResults.slice(0, 24)
     }
 
     return seededResults
@@ -202,11 +326,11 @@ function DashboardWorkspace() {
         const haystack = `${entity.name} ${entity.parentProblem ?? ''}`.toLowerCase()
         return haystack.includes(deferredQuery)
       })
-      .slice(0, 18)
-  }, [deferredQuery, selectedEntity])
+      .slice(0, 24)
+  }, [dashboardData.entities, deferredQuery, selectedEntitySummary])
 
-  const queueSelectedId = selectedAlert?.id ?? fallbackAlert?.id
-  const explorerSelectedId = selectedEntity?.id
+  const queueSelectedId = selectedAlertSummary?.id ?? fallbackAlertSummary?.id
+  const explorerSelectedId = selectedEntitySummary?.id
   const showSearchPanel = searchOpen || Boolean(query)
 
   return (
@@ -285,6 +409,10 @@ function DashboardWorkspace() {
                 <span className="worklist-pane__summary">
                   {deferredQuery ? `${explorerResults.length} matches` : 'Browse categories'}
                 </span>
+              ) : activePane === 'main' ? (
+                <span className="worklist-pane__summary">
+                  {dashboardData.allAlerts.length} active alerts
+                </span>
               ) : null}
             </div>
           </header>
@@ -317,26 +445,34 @@ function DashboardWorkspace() {
         </section>
 
         <section className="detail-pane">
-          {selectedEntity ? (
-            <DetailPanel
-              key={selectedEntity.id}
-              onJumpToAlert={(alertId) => {
-                setQuery('')
-                setActivePane('main')
-                navigate(`/alerts/${alertId}`)
-              }}
-              selection={{ entity: selectedEntity, kind: 'entity', topAlert }}
-            />
-          ) : currentAlert ? (
-            <DetailPanel
-              key={currentAlert.id}
-              onJumpToAlert={(alertId) => {
-                setQuery('')
-                setActivePane('main')
-                navigate(`/alerts/${alertId}`)
-              }}
-              selection={{ alert: currentAlert, kind: 'alert' }}
-            />
+          {selectedEntitySummary ? (
+            selectedEntity ? (
+              <DetailPanel
+                key={selectedEntity.id}
+                onJumpToAlert={(alertId) => {
+                  setQuery('')
+                  setActivePane('main')
+                  navigate(`/alerts/${alertId}`)
+                }}
+                selection={{ entity: selectedEntity, kind: 'entity', topAlert }}
+              />
+            ) : (
+              <DetailLoading error={detailError} title={selectedEntitySummary.name} />
+            )
+          ) : currentAlertSummary ? (
+            currentAlert ? (
+              <DetailPanel
+                key={currentAlert.id}
+                onJumpToAlert={(alertId) => {
+                  setQuery('')
+                  setActivePane('main')
+                  navigate(`/alerts/${alertId}`)
+                }}
+                selection={{ alert: currentAlert, kind: 'alert' }}
+              />
+            ) : (
+              <DetailLoading error={detailError} title={currentAlertSummary.title} />
+            )
           ) : null}
         </section>
       </main>
@@ -344,18 +480,69 @@ function DashboardWorkspace() {
   )
 }
 
+function IndexRedirect({
+  dashboardData,
+}: {
+  dashboardData: DashboardData
+}) {
+  const firstAlert = dashboardData.mainQueue[0] ?? dashboardData.allAlerts[0]
+
+  if (!firstAlert) {
+    return <div className="app-shell" />
+  }
+
+  return <Navigate replace to={`/alerts/${firstAlert.id}`} />
+}
+
 export default function App() {
-  const firstAlert = dashboardData.mainQueue[0]
+  const [dashboardData, setDashboardData] = useState<DashboardData>()
+  const [error, setError] = useState<string>()
+
+  useEffect(() => {
+    let cancelled = false
+
+    fetchDashboardIndex()
+      .then((data) => {
+        if (!cancelled) {
+          setDashboardData(data)
+        }
+      })
+      .catch((loadError: Error) => {
+        if (!cancelled) {
+          setError(loadError.message)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!dashboardData) {
+    return (
+      <div className="app-shell">
+        <main className="workspace-grid">
+          <section className="worklist-pane" />
+          <section className="detail-pane">
+            <DetailLoading error={error} title="NYC 311 Anomaly Desk" />
+          </section>
+        </main>
+      </div>
+    )
+  }
 
   return (
     <BrowserRouter>
       <Routes>
+        <Route path="/" element={<IndexRedirect dashboardData={dashboardData} />} />
         <Route
-          path="/"
-          element={<Navigate replace to={`/alerts/${firstAlert.id}`} />}
+          path="/alerts/:alertId"
+          element={<DashboardWorkspace dashboardData={dashboardData} />}
         />
-        <Route path="/alerts/:alertId" element={<DashboardWorkspace />} />
-        <Route path="/explore/:entityId" element={<DashboardWorkspace />} />
+        <Route
+          path="/explore/:entityId"
+          element={<DashboardWorkspace dashboardData={dashboardData} />}
+        />
       </Routes>
     </BrowserRouter>
   )

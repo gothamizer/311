@@ -7,13 +7,15 @@ import {
   YAxis,
 } from 'recharts'
 
-import { formatCount, formatDateLabel, formatDelta } from '../lib/format'
-import type { ChartHorizon, DailyPoint } from '../types'
+import { formatCount, formatDateLabel } from '../lib/format'
+import type { ChartHorizon, ChartSmoothness, DailyPoint } from '../types'
 
 interface TrendChartProps {
   direction: 'up' | 'down'
+  historyPoints: DailyPoint[]
   horizon: ChartHorizon
   points: DailyPoint[]
+  smoothness: ChartSmoothness
   stackPeriods: boolean
 }
 
@@ -30,10 +32,11 @@ interface ChartRow {
   compare3?: number
   date: string
   expected: number
+  slot: number
 }
 
 interface PreparedChart {
-  axis: 'date' | 'month'
+  axis: 'date' | 'month' | 'relative'
   comparisonLabels: string[]
   comparisonTotals: number[]
   rows: ChartRow[]
@@ -43,9 +46,21 @@ interface PreparedChart {
   }
 }
 
+type CompareKey = 'compare1' | 'compare2' | 'compare3'
+
+const SMOOTHNESS_WINDOW: Record<ChartSmoothness, number> = {
+  raw: 1,
+  '3pt': 3,
+  '7pt': 7,
+}
+
 const monthTick = new Intl.DateTimeFormat('en-US', {
   month: 'short',
   year: '2-digit',
+})
+
+const weekdayTick = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
 })
 
 function parseDate(value: string) {
@@ -179,7 +194,7 @@ function currentPeriodChart(
   const totals = sumPoints(currentRows)
 
   return {
-    axis: 'date',
+    axis: stackPeriods ? 'relative' : 'date',
     comparisonLabels: comparisonSets.map((set) => set.label),
     comparisonTotals: comparisonSets.map((set) => sumPoints(set.rows).actual),
     rows: currentRows.map((point, index) => ({
@@ -189,42 +204,24 @@ function currentPeriodChart(
       compare3: comparisonSets[2]?.rows[index]?.actual,
       date: point.date,
       expected: point.expected,
+      slot: index,
     })),
     totals,
   }
 }
 
 function fullHistoryChart(points: DailyPoint[]): PreparedChart {
-  const monthlyMap = new Map<
-    string,
-    {
-      actual: number
-      expected: number
-    }
-  >()
-
-  for (const point of points) {
-    const date = parseDate(point.date)
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
-    const current = monthlyMap.get(key) ?? { actual: 0, expected: 0 }
-
-    current.actual += point.actual
-    current.expected += point.expected
-    monthlyMap.set(key, current)
-  }
-
-  const rows = Array.from(monthlyMap.entries()).map(([key, totals]) => ({
-    actual: totals.actual,
-    date: `${key}-01`,
-    expected: totals.expected,
-  }))
-  const latest = rows.at(-1)
-
+  const latest = points.at(-1)
   return {
     axis: 'month',
     comparisonLabels: [],
     comparisonTotals: [],
-    rows,
+    rows: points.map((point, index) => ({
+      actual: point.actual,
+      date: point.date,
+      expected: point.expected,
+      slot: index,
+    })),
     totals: {
       actual: latest?.actual ?? 0,
       expected: latest?.expected ?? 0,
@@ -232,92 +229,268 @@ function fullHistoryChart(points: DailyPoint[]): PreparedChart {
   }
 }
 
-function prepareChart(points: DailyPoint[], horizon: ChartHorizon, stackPeriods: boolean) {
+function prepareChart(
+  points: DailyPoint[],
+  historyPoints: DailyPoint[],
+  horizon: ChartHorizon,
+  stackPeriods: boolean,
+) {
   if (horizon === 'full') {
-    return fullHistoryChart(points)
+    return fullHistoryChart(historyPoints)
   }
 
   return currentPeriodChart(points, horizon, stackPeriods)
 }
 
+function smoothRows(rows: ChartRow[], smoothness: ChartSmoothness) {
+  const windowSize = SMOOTHNESS_WINDOW[smoothness]
+
+  if (windowSize <= 1) {
+    return rows
+  }
+
+  const radius = Math.floor(windowSize / 2)
+  const numericKeys: Array<keyof Pick<ChartRow, 'actual' | 'expected' | 'compare1' | 'compare2' | 'compare3'>> = [
+    'actual',
+    'expected',
+    'compare1',
+    'compare2',
+    'compare3',
+  ]
+
+  return rows.map((row, index) => {
+    const nextRow: ChartRow = { ...row }
+    const start = Math.max(0, index - radius)
+    const end = Math.min(rows.length - 1, index + radius)
+
+    for (const key of numericKeys) {
+      let sum = 0
+      let count = 0
+
+      for (let cursor = start; cursor <= end; cursor += 1) {
+        const value = rows[cursor][key]
+
+        if (typeof value === 'number') {
+          sum += value
+          count += 1
+        }
+      }
+
+      if (count > 0) {
+        nextRow[key] = sum / count
+      }
+    }
+
+    return nextRow
+  })
+}
+
+function lastNumericIndex(rows: ChartRow[], key: CompareKey) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (typeof rows[index][key] === 'number') {
+      return index
+    }
+  }
+
+  return -1
+}
+
+function SeriesEndLabel({
+  color,
+  cx,
+  cy,
+  dx = -6,
+  dy = -6,
+  index,
+  label,
+  targetIndex,
+  value,
+}: {
+  color: string
+  cx?: number
+  cy?: number
+  dx?: number
+  dy?: number
+  index?: number
+  label: string
+  targetIndex: number
+  value?: number
+}) {
+  if (
+    typeof cx !== 'number'
+    || typeof cy !== 'number'
+    || typeof index !== 'number'
+    || index !== targetIndex
+    || typeof value !== 'number'
+  ) {
+    return null
+  }
+
+  return (
+    <g>
+      <circle cx={cx} cy={cy} fill={color} fillOpacity={0.92} r={1.8} />
+      <text
+        fill={color}
+        fillOpacity={0.82}
+        fontFamily="IBM Plex Sans, sans-serif"
+        fontSize={10}
+        letterSpacing="0.04em"
+        textAnchor="end"
+        x={cx + dx}
+        y={cy + dy}
+      >
+        {label}
+      </text>
+    </g>
+  )
+}
+
+function renderSeriesEndLabel(
+  label: string,
+  color: string,
+  targetIndex: number,
+  offsets?: {
+    dx?: number
+    dy?: number
+  },
+) {
+  return function SeriesLabelRenderer(props: {
+    cx?: number
+    cy?: number
+    index?: number
+    value?: number
+  }) {
+    return (
+      <SeriesEndLabel
+        color={color}
+        cx={props.cx}
+        cy={props.cy}
+        dx={offsets?.dx}
+        dy={offsets?.dy}
+        index={props.index}
+        label={label}
+        targetIndex={targetIndex}
+        value={props.value}
+      />
+    )
+  }
+}
+
+function formatRelativeTick(
+  slotValue: number,
+  horizon: Exclude<ChartHorizon, 'full'>,
+  rows: ChartRow[],
+) {
+  const slot = Number(slotValue)
+  const point = rows[slot]
+
+  if (!point) {
+    return ''
+  }
+
+  if (horizon === '7d') {
+    return weekdayTick.format(parseDate(point.date))
+  }
+
+  if (horizon === '30d') {
+    return `Day ${slot + 1}`
+  }
+
+  if (horizon === 'quarter') {
+    return `Week ${Math.floor(slot / 7) + 1}`
+  }
+
+  return monthTick.format(parseDate(point.date))
+}
+
 function LegendItem({
+  color,
   dashed = false,
   label,
-  tone = 'actual',
 }: {
+  color: string
   dashed?: boolean
   label: string
-  tone?: 'actual' | 'compare' | 'expected'
 }) {
   return (
     <span className="trend-chart__legend-item">
       <span
-        className={`trend-chart__swatch trend-chart__swatch--${tone} ${dashed ? 'is-dashed' : ''}`}
+        className={`trend-chart__swatch ${dashed ? 'is-dashed' : ''}`}
+        style={{ borderTopColor: color }}
       />
       {label}
     </span>
   )
 }
 
-function SummaryStat({
-  label,
-  value,
-}: {
-  label: string
-  value: string
-}) {
-  return (
-    <div className="trend-chart__stat">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  )
-}
-
 export function TrendChart({
   direction,
+  historyPoints,
   horizon,
   points,
+  smoothness,
   stackPeriods,
 }: TrendChartProps) {
-  const chart = prepareChart(points, horizon, stackPeriods)
+  const chart = prepareChart(points, historyPoints, horizon, stackPeriods)
+  const chartRows = smoothRows(chart.rows, smoothness)
   const accentColor = direction === 'up' ? '#ffb04c' : '#74d1d6'
-  const latestDelta =
-    ((chart.totals.actual - chart.totals.expected) / Math.max(1, chart.totals.expected)) * 100
+  const actualColor = 'rgba(244, 247, 252, 0.96)'
+  const compare1LastIndex = lastNumericIndex(chartRows, 'compare1')
+  const compare2LastIndex = lastNumericIndex(chartRows, 'compare2')
+  const compare3LastIndex = lastNumericIndex(chartRows, 'compare3')
+  const compare1Color = 'rgba(95, 184, 255, 0.78)'
+  const compare2Color = 'rgba(120, 212, 170, 0.78)'
+  const compare3Color = 'rgba(201, 128, 168, 0.74)'
+  const relativeHorizon = horizon === 'full' ? undefined : horizon
+  const currentStart = chart.rows[0]?.date
+  const currentEnd = chart.rows.at(-1)?.date
+  const currentWindowLabel =
+    stackPeriods && currentStart && currentEnd
+      ? `Current window: ${formatDateLabel(currentStart)} to ${formatDateLabel(currentEnd)}`
+      : undefined
 
   return (
     <div className="trend-chart">
       <div className="trend-chart__bar">
         <div className="trend-chart__legend">
-          <LegendItem label="Actual" />
-          <LegendItem dashed label="Expected" tone="expected" />
+          <LegendItem color={actualColor} label="Actual" />
+          <LegendItem color={accentColor} dashed label="Expected" />
           {stackPeriods
-            ? chart.comparisonLabels.map((label) => (
-                <LegendItem key={label} label={label} tone="compare" />
+            ? chart.comparisonLabels.map((label, index) => (
+                <LegendItem
+                  color={
+                    index === 0
+                      ? compare1Color
+                      : index === 1
+                        ? compare2Color
+                        : compare3Color
+                  }
+                  key={label}
+                  label={label}
+                />
               ))
             : null}
         </div>
-
-        <div className="trend-chart__stats">
-          <SummaryStat label="Actual" value={formatCount(chart.totals.actual)} />
-          <SummaryStat label="Expected" value={formatCount(chart.totals.expected)} />
-          <SummaryStat label="Delta" value={formatDelta(latestDelta)} />
-        </div>
+        {currentWindowLabel ? (
+          <div className="trend-chart__window-label">{currentWindowLabel}</div>
+        ) : null}
       </div>
 
       <div className="trend-chart__surface">
         <ResponsiveContainer width="100%" height={316}>
-          <LineChart data={chart.rows} margin={{ left: -10, right: 10, top: 16, bottom: 0 }}>
+          <LineChart data={chartRows} margin={{ left: -10, right: 10, top: 16, bottom: 0 }}>
             <CartesianGrid stroke="rgba(229, 233, 241, 0.08)" vertical={false} />
             <XAxis
               axisLine={false}
-              dataKey="date"
-              minTickGap={chart.axis === 'month' ? 28 : 20}
+              dataKey={chart.axis === 'relative' ? 'slot' : 'date'}
+              minTickGap={chart.axis === 'month' ? 28 : chart.axis === 'relative' ? 18 : 20}
               tick={{ fill: 'rgba(225, 227, 233, 0.64)', fontSize: 11 }}
               tickFormatter={(value) =>
                 chart.axis === 'month'
                   ? monthTick.format(parseDate(value))
-                  : formatDateLabel(value)
+                  : chart.axis === 'relative' && relativeHorizon
+                    ? formatRelativeTick(Number(value), relativeHorizon, chart.rows)
+                    : formatDateLabel(value)
               }
               tickLine={false}
             />
@@ -332,57 +505,83 @@ export function TrendChart({
               activeDot={false}
               animationDuration={360}
               dataKey="actual"
-              dot={false}
+              dot={
+                stackPeriods
+                  ? renderSeriesEndLabel('Actual', actualColor, chartRows.length - 1, {
+                      dx: -6,
+                      dy: 12,
+                    })
+                  : false
+              }
               isAnimationActive
-              stroke="rgba(244, 247, 252, 0.96)"
+              stroke={actualColor}
               strokeWidth={2.3}
-              type="linear"
+              type={smoothness === 'raw' ? 'linear' : 'monotone'}
             />
             <Line
               activeDot={false}
               animationDuration={360}
               dataKey="expected"
-              dot={false}
+              dot={
+                stackPeriods
+                  ? renderSeriesEndLabel('Expected', accentColor, chartRows.length - 1, {
+                      dx: -6,
+                      dy: -8,
+                    })
+                  : false
+              }
               isAnimationActive
               stroke={accentColor}
               strokeDasharray="5 5"
               strokeWidth={1.8}
-              type="linear"
+              type={smoothness === 'raw' ? 'linear' : 'monotone'}
             />
-            {stackPeriods && chart.rows.some((row) => typeof row.compare1 === 'number') ? (
+            {stackPeriods && chartRows.some((row) => typeof row.compare1 === 'number') ? (
               <Line
                 activeDot={false}
                 animationDuration={360}
                 dataKey="compare1"
-                dot={false}
+                dot={renderSeriesEndLabel(
+                  chart.comparisonLabels[0] ?? 'Prev period',
+                  compare1Color,
+                  compare1LastIndex,
+                )}
                 isAnimationActive
-                stroke="rgba(158, 169, 188, 0.72)"
+                stroke={compare1Color}
                 strokeWidth={1.45}
-                type="linear"
+                type={smoothness === 'raw' ? 'linear' : 'monotone'}
               />
             ) : null}
-            {stackPeriods && chart.rows.some((row) => typeof row.compare2 === 'number') ? (
+            {stackPeriods && chartRows.some((row) => typeof row.compare2 === 'number') ? (
               <Line
                 activeDot={false}
                 animationDuration={360}
                 dataKey="compare2"
-                dot={false}
+                dot={renderSeriesEndLabel(
+                  chart.comparisonLabels[1] ?? '2 periods ago',
+                  compare2Color,
+                  compare2LastIndex,
+                )}
                 isAnimationActive
-                stroke="rgba(126, 137, 156, 0.58)"
+                stroke={compare2Color}
                 strokeWidth={1.25}
-                type="linear"
+                type={smoothness === 'raw' ? 'linear' : 'monotone'}
               />
             ) : null}
-            {stackPeriods && chart.rows.some((row) => typeof row.compare3 === 'number') ? (
+            {stackPeriods && chartRows.some((row) => typeof row.compare3 === 'number') ? (
               <Line
                 activeDot={false}
                 animationDuration={360}
                 dataKey="compare3"
-                dot={false}
+                dot={renderSeriesEndLabel(
+                  chart.comparisonLabels[2] ?? '3 periods ago',
+                  compare3Color,
+                  compare3LastIndex,
+                )}
                 isAnimationActive
-                stroke="rgba(101, 111, 129, 0.48)"
+                stroke={compare3Color}
                 strokeWidth={1.1}
-                type="linear"
+                type={smoothness === 'raw' ? 'linear' : 'monotone'}
               />
             ) : null}
           </LineChart>

@@ -56,9 +56,9 @@ export function formatHorizonLabel(horizon: Horizon) {
     case '30d':
       return '30D'
     case 'quarter':
-      return '90D'
+      return 'Quarter'
     case 'year':
-      return '12M'
+      return 'Year'
   }
 }
 
