@@ -54,7 +54,7 @@ export function formatHorizonLabel(horizon: Horizon) {
     case '7d':
       return '7D'
     case '30d':
-      return 'MTD'
+      return '30D'
     case 'quarter':
       return '90D'
     case 'year':
@@ -90,7 +90,7 @@ export function compactSummary(summary: string, horizon: Horizon) {
   if (horizon === '30d') {
     compact = summary.replace(
       /^The (last month|last 30 days|month-like window)\s+/i,
-      'Month-to-date volume ',
+      '30-day volume ',
     )
     return sentenceCase(compact)
   }

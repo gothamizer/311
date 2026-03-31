@@ -24,7 +24,7 @@ import type { AlertRecord, EntityRecord, PaneKey } from './types'
 const PANE_META: Array<{ key: PaneKey; label: string }> = [
   { key: 'main', label: 'Queue' },
   { key: '7d', label: '7D' },
-  { key: '30d', label: 'MTD' },
+  { key: '30d', label: '30D' },
   { key: 'quarter', label: '90D' },
   { key: 'year', label: '12M' },
 ]

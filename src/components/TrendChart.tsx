@@ -56,10 +56,6 @@ function toIsoDate(date: Date) {
   return date.toISOString().slice(0, 10)
 }
 
-function getStartOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1)
-}
-
 function addDays(date: Date, days: number) {
   const next = new Date(date)
   next.setDate(next.getDate() + days)
@@ -100,17 +96,16 @@ function sumPoints(points: PeriodPoint[]) {
 }
 
 function sliceCurrentPeriod(points: DailyPoint[], horizon: Exclude<ChartHorizon, 'full'>) {
-  const finalDate = parseDate(points.at(-1)?.date ?? toIsoDate(new Date()))
-
   if (horizon === '7d') {
     return points.slice(-7).map(toPeriodPoint)
   }
 
-  if (horizon === '30d') {
-    return extractWindow(points, getStartOfMonth(finalDate), finalDate)
-  }
-
-  const trailingDays = horizon === 'quarter' ? 90 : 365
+  const trailingDays =
+    horizon === '30d'
+      ? 30
+      : horizon === 'quarter'
+        ? 90
+        : 365
 
   return points.slice(-trailingDays).map(toPeriodPoint)
 }
@@ -128,21 +123,16 @@ function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
   })
 }
 
-function previousYearMonthSets(points: DailyPoint[], finalDate: Date, currentLength: number) {
-  return [1, 2, 3].map((offset) => {
-    const start = new Date(finalDate.getFullYear() - offset, finalDate.getMonth(), 1)
-    const end = new Date(start)
-    end.setDate(start.getDate() + currentLength)
+function previousTrailingWindowSets(points: DailyPoint[], currentRows: PeriodPoint[], unitLabel: string) {
+  const currentLength = currentRows.length
 
-    return {
-      label: monthTick.format(start),
-      rows: points
-        .filter((point) => {
-          const date = parseDate(point.date)
-          return date >= start && date < end
-        })
-        .map(toPeriodPoint),
-    }
+  return [1, 2, 3].map((offset) => {
+    const endIndex = points.length - currentLength * offset
+    const startIndex = Math.max(0, endIndex - currentLength)
+    const rows = points.slice(startIndex, endIndex).map(toPeriodPoint)
+    const label = offset === 1 ? `Prev ${unitLabel}` : `${offset}x ${unitLabel} ago`
+
+    return { label, rows }
   })
 }
 
@@ -171,7 +161,7 @@ function previousComparableSets(
   }
 
   if (horizon === '30d') {
-    return previousYearMonthSets(points, finalDate, currentLength)
+    return previousTrailingWindowSets(points, currentRows, '30D')
   }
 
   return previousTrailingYearSets(points, finalDate, currentLength)

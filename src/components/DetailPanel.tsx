@@ -216,7 +216,7 @@ export function DetailPanel({
           <div className="control-group__buttons">
             {([
               ['7d', '7D'],
-              ['30d', 'MTD'],
+              ['30d', '30D'],
               ['quarter', '90D'],
               ['year', '12M'],
               ['full', 'History'],
