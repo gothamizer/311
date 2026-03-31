@@ -29,6 +29,15 @@ const PANE_META: Array<{ key: PaneKey; label: string }> = [
   { key: 'year', label: 'YTD' },
 ]
 
+function SearchIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <circle cx="8.25" cy="8.25" r="4.75" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M11.8 11.8 16.2 16.2" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+    </svg>
+  )
+}
+
 function QueueRow({
   alert,
   selected,
@@ -120,6 +129,7 @@ function DashboardWorkspace() {
   const params = useParams<{ alertId?: string; entityId?: string }>()
   const [activePane, setActivePane] = useState<PaneKey>('main')
   const [query, setQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
 
   const activeRows =
@@ -143,10 +153,12 @@ function DashboardWorkspace() {
 
   function openAlert(alertId: string) {
     setQuery('')
+    setSearchOpen(false)
     navigate(`/alerts/${alertId}`)
   }
 
   function openEntity(entityId: string) {
+    setSearchOpen(false)
     navigate(`/explore/${encodeURIComponent(entityId)}`)
   }
 
@@ -169,6 +181,7 @@ function DashboardWorkspace() {
 
   function returnToQueue() {
     setQuery('')
+    setSearchOpen(false)
     navigate(`/alerts/${(selectedAlert ?? fallbackAlert).id}`)
   }
 
@@ -194,30 +207,28 @@ function DashboardWorkspace() {
 
   const queueSelectedId = selectedAlert?.id ?? fallbackAlert?.id
   const explorerSelectedId = selectedEntity?.id
+  const showSearchPanel = searchOpen || Boolean(query)
 
   return (
     <div className="app-shell">
       <main className="workspace-grid">
         <section className="worklist-pane">
           <header className="worklist-pane__header">
-            <div className="worklist-pane__utility">
-              <p className="section-kicker">NYC 311 anomaly desk</p>
-              <span className="worklist-pane__stamp">
-                {formatFullDate(dashboardData.lastRefresh)}
-              </span>
-            </div>
-
-            <div className="worklist-pane__search-row">
-              <label className="explorer-search explorer-search--worklist">
-                <span className="sr-only">Search Problem or Problem Detail</span>
-                <input
-                  placeholder="Jump to Problem or Problem Detail"
-                  type="search"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              </label>
-              {showExplorer ? (
+            <div className="worklist-pane__toolbar">
+              {!showExplorer ? (
+                <div className="queue-tabs">
+                  {PANE_META.map((pane) => (
+                    <button
+                      key={pane.key}
+                      className={`queue-tabs__tab ${activePane === pane.key ? 'is-active' : ''}`}
+                      type="button"
+                      onClick={() => changePane(pane.key)}
+                    >
+                      {pane.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
                 <button
                   className="worklist-pane__return"
                   type="button"
@@ -225,36 +236,57 @@ function DashboardWorkspace() {
                 >
                   Queue
                 </button>
-              ) : null}
-            </div>
+              )}
 
-            <div className="worklist-pane__title-row">
-              <div>
-                <h1>{showExplorer ? 'Categories' : 'Current queue'}</h1>
-                <p className="worklist-pane__summary">
-                  {showExplorer
-                    ? deferredQuery
-                      ? `${explorerResults.length} matches`
-                      : 'Problem and Problem Detail lookup'
-                    : `${activeRows.length} ranked alerts`}
-                </p>
+              <div className="worklist-pane__actions">
+                <span className="worklist-pane__stamp">
+                  {formatFullDate(dashboardData.lastRefresh)}
+                </span>
+                <button
+                  aria-label="Search categories"
+                  className={`icon-button ${showSearchPanel ? 'is-active' : ''}`}
+                  type="button"
+                  onClick={() => setSearchOpen((current) => !current)}
+                >
+                  <SearchIcon />
+                </button>
               </div>
             </div>
 
-            {!showExplorer ? (
-              <div className="queue-tabs">
-                {PANE_META.map((pane) => (
+            {showSearchPanel ? (
+              <div className="search-popover">
+                <label className="explorer-search explorer-search--popover">
+                  <span className="sr-only">Search Problem or Problem Detail</span>
+                  <input
+                    autoFocus
+                    placeholder="Jump to Problem or Problem Detail"
+                    type="search"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </label>
+                {query ? (
                   <button
-                    key={pane.key}
-                    className={`queue-tabs__tab ${activePane === pane.key ? 'is-active' : ''}`}
+                    className="worklist-pane__return"
                     type="button"
-                    onClick={() => changePane(pane.key)}
+                    onClick={() => setQuery('')}
                   >
-                    {pane.label}
+                    Clear
                   </button>
-                ))}
+                ) : null}
               </div>
             ) : null}
+
+            <div className="worklist-pane__inline-title">
+              <p className="section-kicker">
+                {showExplorer ? 'Category results' : 'Current queue'}
+              </p>
+              {showExplorer ? (
+                <span className="worklist-pane__summary">
+                  {deferredQuery ? `${explorerResults.length} matches` : 'Browse categories'}
+                </span>
+              ) : null}
+            </div>
           </header>
 
           {showExplorer ? (

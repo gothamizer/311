@@ -8,7 +8,7 @@ import {
   formatHorizonLabel,
   formatPercentile,
 } from '../lib/format'
-import type { AlertRecord, Contributor, EntityRecord, Horizon } from '../types'
+import type { AlertRecord, ChartHorizon, Contributor, EntityRecord } from '../types'
 import { DistrictMap } from './DistrictMap'
 import { TrendChart } from './TrendChart'
 
@@ -26,6 +26,10 @@ type DetailSelection =
 interface DetailPanelProps {
   onJumpToAlert: (alertId: string) => void
   selection: DetailSelection
+}
+
+function getDefaultChartHorizon(baseHorizon: AlertRecord['horizon'] | EntityRecord['defaultHorizon']): ChartHorizon {
+  return baseHorizon === 'today' ? '7d' : baseHorizon
 }
 
 function SignalBar({
@@ -59,11 +63,23 @@ export function DetailPanel({
 }: DetailPanelProps) {
   const entity = selection.kind === 'entity' ? selection.entity : undefined
   const alert = selection.kind === 'alert' ? selection.alert : selection.topAlert
+  const selectionKey = selection.kind === 'alert' ? selection.alert.id : selection.entity.id
   const baseHorizon =
     selection.kind === 'alert'
       ? selection.alert.horizon
       : selection.entity.defaultHorizon
-  const [chartHorizon, setChartHorizon] = useState<Horizon>(baseHorizon)
+  const defaultChartHorizon = getDefaultChartHorizon(baseHorizon)
+  const stateFallback = {
+    horizon: defaultChartHorizon,
+    selectionKey,
+    stackPeriods:
+      defaultChartHorizon === 'quarter' || defaultChartHorizon === 'year',
+  }
+  const [chartState, setChartState] = useState(stateFallback)
+  const effectiveChartState =
+    chartState.selectionKey === selectionKey ? chartState : stateFallback
+  const chartHorizon = effectiveChartState.horizon
+  const stackPeriods = effectiveChartState.stackPeriods
   const title =
     selection.kind === 'alert'
       ? selection.alert.title
@@ -197,34 +213,54 @@ export function DetailPanel({
         </div>
 
         <div className="detail-panel__controls">
-          <div>
-            <p className="section-kicker">Complaints</p>
-            <h3 className="section-title">Actual vs expected</h3>
-          </div>
           <div className="control-group__buttons">
             {([
-              ['today', 'Today'],
               ['7d', '7D'],
               ['30d', 'MTD'],
               ['quarter', 'QTD'],
               ['year', 'YTD'],
+              ['full', 'History'],
             ] as const).map(([value, label]) => (
               <button
                 key={value}
                 className={`chart-control ${chartHorizon === value ? 'is-active' : ''}`}
                 type="button"
-                onClick={() => setChartHorizon(value)}
+                onClick={() =>
+                  setChartState({
+                    ...effectiveChartState,
+                    horizon: value,
+                    selectionKey,
+                  })
+                }
               >
                 {label}
               </button>
             ))}
           </div>
+
+          {chartHorizon !== 'full' ? (
+            <label className="chart-checkbox">
+              <input
+                checked={stackPeriods}
+                type="checkbox"
+                onChange={(event) =>
+                  setChartState({
+                    ...effectiveChartState,
+                    selectionKey,
+                    stackPeriods: event.target.checked,
+                  })
+                }
+              />
+              <span>Stack periods</span>
+            </label>
+          ) : null}
         </div>
 
         <TrendChart
           direction={direction === 'up' ? 'up' : 'down'}
           horizon={chartHorizon}
           points={timeline}
+          stackPeriods={stackPeriods && chartHorizon !== 'full'}
         />
 
         <div className="detail-panel__grid">

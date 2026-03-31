@@ -1,4 +1,5 @@
 export type Horizon = 'today' | '7d' | '30d' | 'quarter' | 'year'
+export type ChartHorizon = '7d' | '30d' | 'quarter' | 'year' | 'full'
 
 export type PaneKey = 'main' | '7d' | '30d' | 'quarter' | 'year'
 

@@ -16,7 +16,7 @@ import type {
 } from '../types'
 
 const TODAY = new Date('2026-03-30T12:00:00-04:00')
-const START = new Date('2024-01-01T12:00:00-05:00')
+const START = new Date('2020-01-01T12:00:00-05:00')
 
 const HORIZONS: Horizon[] = ['today', '7d', '30d', 'quarter', 'year']
 

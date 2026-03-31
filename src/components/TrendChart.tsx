@@ -2,23 +2,25 @@ import {
   CartesianGrid,
   Line,
   LineChart,
-  ReferenceArea,
   ResponsiveContainer,
   XAxis,
   YAxis,
 } from 'recharts'
 
-import {
-  formatCount,
-  formatDateLabel,
-  formatDelta,
-} from '../lib/format'
-import type { DailyPoint, Horizon } from '../types'
+import { formatCount, formatDateLabel, formatDelta } from '../lib/format'
+import type { ChartHorizon, DailyPoint } from '../types'
 
 interface TrendChartProps {
   direction: 'up' | 'down'
-  horizon: Horizon
+  horizon: ChartHorizon
   points: DailyPoint[]
+  stackPeriods: boolean
+}
+
+interface PeriodPoint {
+  actual: number
+  date: string
+  expected: number
 }
 
 interface ChartRow {
@@ -31,15 +33,20 @@ interface ChartRow {
 }
 
 interface PreparedChart {
+  axis: 'date' | 'month'
   comparisonLabels: string[]
-  descriptor: string
-  emphasis?: {
-    from: string
-    to: string
-  }
+  comparisonTotals: number[]
   rows: ChartRow[]
-  subtitle: string
+  totals: {
+    actual: number
+    expected: number
+  }
 }
+
+const monthTick = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  year: '2-digit',
+})
 
 function parseDate(value: string) {
   return new Date(`${value}T12:00:00`)
@@ -49,204 +56,293 @@ function toIsoDate(date: Date) {
   return date.toISOString().slice(0, 10)
 }
 
+function getStartOfMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
 function getStartOfQuarter(date: Date) {
   return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1)
 }
 
-function rollingRows(points: DailyPoint[], windowSize: number, take: number) {
-  const rows: ChartRow[] = []
-
-  for (let index = windowSize - 1; index < points.length; index += 1) {
-    const window = points.slice(index - windowSize + 1, index + 1)
-    rows.push({
-      actual: window.reduce((sum, point) => sum + point.actual, 0),
-      date: points[index].date,
-      expected: window.reduce((sum, point) => sum + point.expected, 0),
-    })
-  }
-
-  return rows.slice(-take)
+function getStartOfYear(date: Date) {
+  return new Date(date.getFullYear(), 0, 1)
 }
 
-function trailingRows(points: DailyPoint[], horizon: Horizon): PreparedChart {
-  if (horizon === 'today') {
-    const rows = points.slice(-21).map((point) => ({
+function getQuarterLabel(date: Date) {
+  return `Q${Math.floor(date.getMonth() / 3) + 1} ${date.getFullYear()}`
+}
+
+function sumPoints(points: PeriodPoint[]) {
+  return points.reduce(
+    (result, point) => ({
+      actual: result.actual + point.actual,
+      expected: result.expected + point.expected,
+    }),
+    { actual: 0, expected: 0 },
+  )
+}
+
+function sliceCurrentPeriod(points: DailyPoint[], horizon: Exclude<ChartHorizon, 'full'>) {
+  const finalDate = parseDate(points.at(-1)?.date ?? toIsoDate(new Date()))
+
+  if (horizon === '7d') {
+    return points.slice(-7).map((point) => ({
+      actual: point.actual,
+      date: point.date,
+      expected: point.expected,
+    }))
+  }
+
+  const start =
+    horizon === '30d'
+      ? getStartOfMonth(finalDate)
+      : horizon === 'quarter'
+        ? getStartOfQuarter(finalDate)
+        : getStartOfYear(finalDate)
+
+  return points
+    .filter((point) => parseDate(point.date) >= start)
+    .map((point) => ({
+      actual: point.actual,
+      date: point.date,
+      expected: point.expected,
+    }))
+}
+
+function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
+  const currentLength = currentRows.length
+  const labels = ['Prev week', '2w ago', '3w ago']
+
+  return labels.map((label, index) => {
+    const endIndex = points.length - currentLength * (index + 1)
+    const startIndex = Math.max(0, endIndex - currentLength)
+    const rows = points.slice(startIndex, endIndex).map((point) => ({
       actual: point.actual,
       date: point.date,
       expected: point.expected,
     }))
 
-    return {
-      comparisonLabels: [],
-      descriptor: 'Daily complaints',
-      emphasis: rows.at(-1) ? { from: rows.at(-1)!.date, to: rows.at(-1)!.date } : undefined,
-      rows,
-      subtitle: 'Last 3 weeks',
-    }
-  }
-
-  if (horizon === '7d') {
-    const rows = rollingRows(points, 7, 84)
-
-    return {
-      comparisonLabels: [],
-      descriptor: 'Rolling 7-day total',
-      emphasis:
-        rows.length >= 7
-          ? { from: rows.at(-7)!.date, to: rows.at(-1)!.date }
-          : undefined,
-      rows,
-      subtitle: 'Last 12 weeks',
-    }
-  }
-
-  const rows = rollingRows(points, 30, 180)
-
-  return {
-    comparisonLabels: [],
-    descriptor: 'Rolling 30-day total',
-    emphasis:
-      rows.length >= 30
-        ? { from: rows.at(-30)!.date, to: rows.at(-1)!.date }
-        : undefined,
-    rows,
-    subtitle: 'Last 6 months',
-  }
+    return { label, rows }
+  })
 }
 
-function periodRows(points: DailyPoint[], horizon: Extract<Horizon, 'quarter' | 'year'>): PreparedChart {
+function previousYearMonthSets(points: DailyPoint[], finalDate: Date, currentLength: number) {
+  return [1, 2, 3].map((offset) => {
+    const start = new Date(finalDate.getFullYear() - offset, finalDate.getMonth(), 1)
+    const end = new Date(start)
+    end.setDate(start.getDate() + currentLength)
+
+    return {
+      label: monthTick.format(start),
+      rows: points
+        .filter((point) => {
+          const date = parseDate(point.date)
+          return date >= start && date < end
+        })
+        .map((point) => ({
+          actual: point.actual,
+          date: point.date,
+          expected: point.expected,
+        })),
+    }
+  })
+}
+
+function previousComparableSets(
+  points: DailyPoint[],
+  horizon: Exclude<ChartHorizon, 'full'>,
+  currentRows: PeriodPoint[],
+) {
   const finalDate = parseDate(points.at(-1)?.date ?? toIsoDate(new Date()))
+  const currentLength = currentRows.length
+
+  if (horizon === '7d') {
+    return previousWeekSets(points, currentRows)
+  }
+
+  if (horizon === '30d') {
+    return previousYearMonthSets(points, finalDate, currentLength)
+  }
+
   const currentStart =
-    horizon === 'quarter'
-      ? getStartOfQuarter(finalDate)
-      : new Date(finalDate.getFullYear(), 0, 1)
-  const currentRows = points.filter((point) => parseDate(point.date) >= currentStart)
-  const comparisonSets = [1, 2, 3].map((offset) => {
+    horizon === 'quarter' ? getStartOfQuarter(finalDate) : getStartOfYear(finalDate)
+
+  return [1, 2, 3].map((offset) => {
     const start =
       horizon === 'quarter'
         ? new Date(currentStart.getFullYear() - offset, currentStart.getMonth(), 1)
-        : new Date(finalDate.getFullYear() - offset, 0, 1)
-    const end =
-      horizon === 'quarter'
-        ? new Date(start.getFullYear(), start.getMonth() + 3, 1)
-        : new Date(start.getFullYear() + 1, 0, 1)
+        : new Date(currentStart.getFullYear() - offset, 0, 1)
+    const end = new Date(start)
+    end.setDate(start.getDate() + currentLength)
 
     return {
-      label: String(start.getFullYear()),
-      rows: points.filter((point) => {
-        const date = parseDate(point.date)
-        return date >= start && date < end
-      }),
+      label: horizon === 'quarter' ? getQuarterLabel(start) : String(start.getFullYear()),
+      rows: points
+        .filter((point) => {
+          const date = parseDate(point.date)
+          return date >= start && date < end
+        })
+        .map((point) => ({
+          actual: point.actual,
+          date: point.date,
+          expected: point.expected,
+        })),
     }
   })
+}
 
-  let runningActual = 0
-  let runningExpected = 0
-  let runningCompare1 = 0
-  let runningCompare2 = 0
-  let runningCompare3 = 0
+function currentPeriodChart(
+  points: DailyPoint[],
+  horizon: Exclude<ChartHorizon, 'full'>,
+  stackPeriods: boolean,
+): PreparedChart {
+  const currentRows = sliceCurrentPeriod(points, horizon)
+  const comparisonSets = stackPeriods
+    ? previousComparableSets(points, horizon, currentRows)
+    : []
+  const totals = sumPoints(currentRows)
 
   return {
+    axis: 'date',
     comparisonLabels: comparisonSets.map((set) => set.label),
-    descriptor: 'Comparable periods',
-    rows: currentRows.map((point, index) => {
-      runningActual += point.actual
-      runningExpected += point.expected
-      runningCompare1 += comparisonSets[0]?.rows[index]?.actual ?? 0
-      runningCompare2 += comparisonSets[1]?.rows[index]?.actual ?? 0
-      runningCompare3 += comparisonSets[2]?.rows[index]?.actual ?? 0
-
-      return {
-        actual: runningActual,
-        compare1: runningCompare1 || undefined,
-        compare2: runningCompare2 || undefined,
-        compare3: runningCompare3 || undefined,
-        date: point.date,
-        expected: runningExpected,
-      }
-    }),
-    subtitle:
-      `vs expected, ${comparisonSets.map((set) => set.label).join(', ')}`,
+    comparisonTotals: comparisonSets.map((set) => sumPoints(set.rows).actual),
+    rows: currentRows.map((point, index) => ({
+      actual: point.actual,
+      compare1: comparisonSets[0]?.rows[index]?.actual,
+      compare2: comparisonSets[1]?.rows[index]?.actual,
+      compare3: comparisonSets[2]?.rows[index]?.actual,
+      date: point.date,
+      expected: point.expected,
+    })),
+    totals,
   }
 }
 
-function prepareRows(points: DailyPoint[], horizon: Horizon) {
-  if (horizon === 'quarter' || horizon === 'year') {
-    return periodRows(points, horizon)
+function fullHistoryChart(points: DailyPoint[]): PreparedChart {
+  const monthlyMap = new Map<
+    string,
+    {
+      actual: number
+      expected: number
+    }
+  >()
+
+  for (const point of points) {
+    const date = parseDate(point.date)
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+    const current = monthlyMap.get(key) ?? { actual: 0, expected: 0 }
+
+    current.actual += point.actual
+    current.expected += point.expected
+    monthlyMap.set(key, current)
   }
 
-  return trailingRows(points, horizon)
+  const rows = Array.from(monthlyMap.entries()).map(([key, totals]) => ({
+    actual: totals.actual,
+    date: `${key}-01`,
+    expected: totals.expected,
+  }))
+  const latest = rows.at(-1)
+
+  return {
+    axis: 'month',
+    comparisonLabels: [],
+    comparisonTotals: [],
+    rows,
+    totals: {
+      actual: latest?.actual ?? 0,
+      expected: latest?.expected ?? 0,
+    },
+  }
+}
+
+function prepareChart(points: DailyPoint[], horizon: ChartHorizon, stackPeriods: boolean) {
+  if (horizon === 'full') {
+    return fullHistoryChart(points)
+  }
+
+  return currentPeriodChart(points, horizon, stackPeriods)
+}
+
+function LegendItem({
+  dashed = false,
+  label,
+  tone = 'actual',
+}: {
+  dashed?: boolean
+  label: string
+  tone?: 'actual' | 'compare' | 'expected'
+}) {
+  return (
+    <span className="trend-chart__legend-item">
+      <span
+        className={`trend-chart__swatch trend-chart__swatch--${tone} ${dashed ? 'is-dashed' : ''}`}
+      />
+      {label}
+    </span>
+  )
 }
 
 function SummaryStat({
-  muted = false,
   label,
   value,
 }: {
-  muted?: boolean
   label: string
   value: string
 }) {
   return (
-    <div className={`trend-chart__stat ${muted ? 'is-muted' : ''}`}>
+    <div className="trend-chart__stat">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
   )
 }
 
-export function TrendChart({ direction, horizon, points }: TrendChartProps) {
-  const chart = prepareRows(points, horizon)
-  const latest = chart.rows.at(-1)
+export function TrendChart({
+  direction,
+  horizon,
+  points,
+  stackPeriods,
+}: TrendChartProps) {
+  const chart = prepareChart(points, horizon, stackPeriods)
   const accentColor = direction === 'up' ? '#ffb04c' : '#74d1d6'
-  const actualColor = 'rgba(244, 247, 252, 0.96)'
-
-  if (!latest) {
-    return null
-  }
-
-  const deltaPct =
-    ((latest.actual - latest.expected) / Math.max(1, latest.expected)) * 100
+  const latestDelta =
+    ((chart.totals.actual - chart.totals.expected) / Math.max(1, chart.totals.expected)) * 100
 
   return (
     <div className="trend-chart">
       <div className="trend-chart__bar">
-        <div className="trend-chart__descriptor">
-          <span>{chart.descriptor}</span>
-          <span>{chart.subtitle}</span>
+        <div className="trend-chart__legend">
+          <LegendItem label="Actual" />
+          <LegendItem dashed label="Expected" tone="expected" />
+          {stackPeriods
+            ? chart.comparisonLabels.map((label) => (
+                <LegendItem key={label} label={label} tone="compare" />
+              ))
+            : null}
         </div>
 
         <div className="trend-chart__stats">
-          <SummaryStat label="Actual" value={formatCount(latest.actual)} />
-          <SummaryStat label="Expected" value={formatCount(latest.expected)} />
-          {typeof latest.compare1 === 'number' ? (
-            <SummaryStat
-              label={chart.comparisonLabels[0] ?? 'Previous'}
-              muted
-              value={formatCount(latest.compare1)}
-            />
-          ) : null}
-          <SummaryStat label="Delta" value={formatDelta(deltaPct)} />
+          <SummaryStat label="Actual" value={formatCount(chart.totals.actual)} />
+          <SummaryStat label="Expected" value={formatCount(chart.totals.expected)} />
+          <SummaryStat label="Delta" value={formatDelta(latestDelta)} />
         </div>
       </div>
 
       <div className="trend-chart__surface">
-        <ResponsiveContainer width="100%" height={314}>
-          <LineChart data={chart.rows} margin={{ left: -10, right: 10, top: 12, bottom: 0 }}>
+        <ResponsiveContainer width="100%" height={316}>
+          <LineChart data={chart.rows} margin={{ left: -10, right: 10, top: 16, bottom: 0 }}>
             <CartesianGrid stroke="rgba(229, 233, 241, 0.08)" vertical={false} />
-            {chart.emphasis ? (
-              <ReferenceArea
-                fill={direction === 'up' ? 'rgba(255, 176, 76, 0.08)' : 'rgba(116, 209, 214, 0.09)'}
-                x1={chart.emphasis.from}
-                x2={chart.emphasis.to}
-              />
-            ) : null}
             <XAxis
               axisLine={false}
               dataKey="date"
-              minTickGap={36}
+              minTickGap={chart.axis === 'month' ? 28 : 20}
               tick={{ fill: 'rgba(225, 227, 233, 0.64)', fontSize: 11 }}
-              tickFormatter={formatDateLabel}
+              tickFormatter={(value) =>
+                chart.axis === 'month'
+                  ? monthTick.format(parseDate(value))
+                  : formatDateLabel(value)
+              }
               tickLine={false}
             />
             <YAxis
@@ -258,64 +354,59 @@ export function TrendChart({ direction, horizon, points }: TrendChartProps) {
             />
             <Line
               activeDot={false}
-              animationDuration={380}
+              animationDuration={360}
               dataKey="actual"
               dot={false}
               isAnimationActive
-              name="Actual"
-              stroke={actualColor}
+              stroke="rgba(244, 247, 252, 0.96)"
               strokeWidth={2.3}
-              type="monotone"
+              type="linear"
             />
             <Line
               activeDot={false}
-              animationDuration={380}
+              animationDuration={360}
               dataKey="expected"
               dot={false}
               isAnimationActive
-              name="Expected"
               stroke={accentColor}
               strokeDasharray="5 5"
               strokeWidth={1.8}
-              type="monotone"
+              type="linear"
             />
-            {chart.rows.some((row) => typeof row.compare1 === 'number') ? (
+            {stackPeriods && chart.rows.some((row) => typeof row.compare1 === 'number') ? (
               <Line
                 activeDot={false}
-                animationDuration={380}
+                animationDuration={360}
                 dataKey="compare1"
                 dot={false}
                 isAnimationActive
-                name={chart.comparisonLabels[0] ?? 'Previous'}
-                stroke="rgba(151, 162, 182, 0.72)"
-                strokeWidth={1.6}
-                type="monotone"
+                stroke="rgba(158, 169, 188, 0.72)"
+                strokeWidth={1.45}
+                type="linear"
               />
             ) : null}
-            {chart.rows.some((row) => typeof row.compare2 === 'number') ? (
+            {stackPeriods && chart.rows.some((row) => typeof row.compare2 === 'number') ? (
               <Line
                 activeDot={false}
-                animationDuration={380}
+                animationDuration={360}
                 dataKey="compare2"
                 dot={false}
                 isAnimationActive
-                name={chart.comparisonLabels[1] ?? 'Two years ago'}
-                stroke="rgba(120, 131, 150, 0.56)"
-                strokeWidth={1.3}
-                type="monotone"
+                stroke="rgba(126, 137, 156, 0.58)"
+                strokeWidth={1.25}
+                type="linear"
               />
             ) : null}
-            {chart.rows.some((row) => typeof row.compare3 === 'number') ? (
+            {stackPeriods && chart.rows.some((row) => typeof row.compare3 === 'number') ? (
               <Line
                 activeDot={false}
-                animationDuration={380}
+                animationDuration={360}
                 dataKey="compare3"
                 dot={false}
                 isAnimationActive
-                name={chart.comparisonLabels[2] ?? 'Three years ago'}
-                stroke="rgba(99, 110, 129, 0.46)"
-                strokeWidth={1.15}
-                type="monotone"
+                stroke="rgba(101, 111, 129, 0.48)"
+                strokeWidth={1.1}
+                type="linear"
               />
             ) : null}
           </LineChart>

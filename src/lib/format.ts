@@ -62,24 +62,46 @@ export function formatHorizonLabel(horizon: Horizon) {
   }
 }
 
+function sentenceCase(value: string) {
+  if (!value) {
+    return value
+  }
+
+  return value[0].toUpperCase() + value.slice(1)
+}
+
 export function compactSummary(summary: string, horizon: Horizon) {
+  let compact = summary
+
   if (horizon === 'today') {
-    return summary.replace(/^Today\s+/i, '')
+    compact = summary
+      .replace(/^Today\s+broke\s+/i, 'Daily volume broke ')
+      .replace(/^Today\s+fell\s+/i, 'Daily volume fell ')
+      .replace(/^Today\s+rose\s+/i, 'Daily volume rose ')
+      .replace(/^Today\s+/i, 'Daily volume ')
+    return sentenceCase(compact)
   }
 
   if (horizon === '7d') {
-    return summary.replace(/^The latest week\s+/i, 'Recent complaints ')
+    compact = summary.replace(/^The (latest|last) week\s+/i, 'Weekly volume ')
+    return sentenceCase(compact)
   }
 
   if (horizon === '30d') {
-    return summary.replace(/^The (last month|last 30 days|month-like window)\s+/i, 'Recent complaints ')
+    compact = summary.replace(
+      /^The (last month|last 30 days|month-like window)\s+/i,
+      'Month-to-date volume ',
+    )
+    return sentenceCase(compact)
   }
 
   if (horizon === 'quarter') {
-    return summary.replace(/^Quarter-to-date\s+/i, '')
+    compact = summary.replace(/^Quarter-to-date\s+/i, '')
+    return sentenceCase(compact)
   }
 
-  return summary.replace(/^Year-to-date\s+/i, '')
+  compact = summary.replace(/^Year-to-date\s+/i, '')
+  return sentenceCase(compact)
 }
 
 export function formatPercentile(percentile: number) {
