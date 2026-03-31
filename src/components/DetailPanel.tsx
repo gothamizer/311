@@ -172,7 +172,7 @@ export function DetailPanel({
                 <p className="metric-figure">{selection.alert.priority}</p>
               </div>
               <div>
-                <p className="metric-label">Projected finish</p>
+                <p className="metric-label">Historic rank</p>
                 <p className="metric-figure">
                   {selection.alert.projectedPercentile
                     ? formatPercentile(selection.alert.projectedPercentile)
@@ -217,8 +217,8 @@ export function DetailPanel({
             {([
               ['7d', '7D'],
               ['30d', 'MTD'],
-              ['quarter', 'QTD'],
-              ['year', 'YTD'],
+              ['quarter', '90D'],
+              ['year', '12M'],
               ['full', 'History'],
             ] as const).map(([value, label]) => (
               <button

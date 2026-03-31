@@ -56,9 +56,9 @@ export function formatHorizonLabel(horizon: Horizon) {
     case '30d':
       return 'MTD'
     case 'quarter':
-      return 'QTD'
+      return '90D'
     case 'year':
-      return 'YTD'
+      return '12M'
   }
 }
 
@@ -96,11 +96,11 @@ export function compactSummary(summary: string, horizon: Horizon) {
   }
 
   if (horizon === 'quarter') {
-    compact = summary.replace(/^Quarter-to-date\s+/i, '')
+    compact = summary.replace(/^Quarter-to-date\s+/i, 'Over the last 90 days, ')
     return sentenceCase(compact)
   }
 
-  compact = summary.replace(/^Year-to-date\s+/i, '')
+  compact = summary.replace(/^Year-to-date\s+/i, 'Over the last 12 months, ')
   return sentenceCase(compact)
 }
 

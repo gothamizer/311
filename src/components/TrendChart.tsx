@@ -60,16 +60,33 @@ function getStartOfMonth(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), 1)
 }
 
-function getStartOfQuarter(date: Date) {
-  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1)
+function addDays(date: Date, days: number) {
+  const next = new Date(date)
+  next.setDate(next.getDate() + days)
+  return next
 }
 
-function getStartOfYear(date: Date) {
-  return new Date(date.getFullYear(), 0, 1)
+function shiftYears(date: Date, years: number) {
+  const next = new Date(date)
+  next.setFullYear(next.getFullYear() + years)
+  return next
 }
 
-function getQuarterLabel(date: Date) {
-  return `Q${Math.floor(date.getMonth() / 3) + 1} ${date.getFullYear()}`
+function toPeriodPoint(point: DailyPoint): PeriodPoint {
+  return {
+    actual: point.actual,
+    date: point.date,
+    expected: point.expected,
+  }
+}
+
+function extractWindow(points: DailyPoint[], start: Date, end: Date) {
+  return points
+    .filter((point) => {
+      const date = parseDate(point.date)
+      return date >= start && date <= end
+    })
+    .map(toPeriodPoint)
 }
 
 function sumPoints(points: PeriodPoint[]) {
@@ -86,27 +103,16 @@ function sliceCurrentPeriod(points: DailyPoint[], horizon: Exclude<ChartHorizon,
   const finalDate = parseDate(points.at(-1)?.date ?? toIsoDate(new Date()))
 
   if (horizon === '7d') {
-    return points.slice(-7).map((point) => ({
-      actual: point.actual,
-      date: point.date,
-      expected: point.expected,
-    }))
+    return points.slice(-7).map(toPeriodPoint)
   }
 
-  const start =
-    horizon === '30d'
-      ? getStartOfMonth(finalDate)
-      : horizon === 'quarter'
-        ? getStartOfQuarter(finalDate)
-        : getStartOfYear(finalDate)
+  if (horizon === '30d') {
+    return extractWindow(points, getStartOfMonth(finalDate), finalDate)
+  }
 
-  return points
-    .filter((point) => parseDate(point.date) >= start)
-    .map((point) => ({
-      actual: point.actual,
-      date: point.date,
-      expected: point.expected,
-    }))
+  const trailingDays = horizon === 'quarter' ? 90 : 365
+
+  return points.slice(-trailingDays).map(toPeriodPoint)
 }
 
 function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
@@ -116,11 +122,7 @@ function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
   return labels.map((label, index) => {
     const endIndex = points.length - currentLength * (index + 1)
     const startIndex = Math.max(0, endIndex - currentLength)
-    const rows = points.slice(startIndex, endIndex).map((point) => ({
-      actual: point.actual,
-      date: point.date,
-      expected: point.expected,
-    }))
+    const rows = points.slice(startIndex, endIndex).map(toPeriodPoint)
 
     return { label, rows }
   })
@@ -139,11 +141,19 @@ function previousYearMonthSets(points: DailyPoint[], finalDate: Date, currentLen
           const date = parseDate(point.date)
           return date >= start && date < end
         })
-        .map((point) => ({
-          actual: point.actual,
-          date: point.date,
-          expected: point.expected,
-        })),
+        .map(toPeriodPoint),
+    }
+  })
+}
+
+function previousTrailingYearSets(points: DailyPoint[], finalDate: Date, currentLength: number) {
+  return [1, 2, 3].map((offset) => {
+    const end = shiftYears(finalDate, -offset)
+    const start = addDays(end, -(currentLength - 1))
+
+    return {
+      label: String(end.getFullYear()),
+      rows: extractWindow(points, start, end),
     }
   })
 }
@@ -164,31 +174,7 @@ function previousComparableSets(
     return previousYearMonthSets(points, finalDate, currentLength)
   }
 
-  const currentStart =
-    horizon === 'quarter' ? getStartOfQuarter(finalDate) : getStartOfYear(finalDate)
-
-  return [1, 2, 3].map((offset) => {
-    const start =
-      horizon === 'quarter'
-        ? new Date(currentStart.getFullYear() - offset, currentStart.getMonth(), 1)
-        : new Date(currentStart.getFullYear() - offset, 0, 1)
-    const end = new Date(start)
-    end.setDate(start.getDate() + currentLength)
-
-    return {
-      label: horizon === 'quarter' ? getQuarterLabel(start) : String(start.getFullYear()),
-      rows: points
-        .filter((point) => {
-          const date = parseDate(point.date)
-          return date >= start && date < end
-        })
-        .map((point) => ({
-          actual: point.actual,
-          date: point.date,
-          expected: point.expected,
-        })),
-    }
-  })
+  return previousTrailingYearSets(points, finalDate, currentLength)
 }
 
 function currentPeriodChart(

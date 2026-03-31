@@ -1,4 +1,4 @@
-import { clamp } from '../lib/format'
+import { clamp, formatHorizonLabel } from '../lib/format'
 import type {
   AlertRecord,
   ArtifactFlag,
@@ -18,6 +18,8 @@ import type {
 const TODAY = new Date('2026-03-30T12:00:00-04:00')
 const ANALYTICS_START = new Date('2024-01-01T12:00:00-05:00')
 const HISTORY_START = new Date('2020-01-01T12:00:00-05:00')
+const TRAILING_90_DAY_WINDOW = 90
+const TRAILING_12_MONTH_WINDOW = 365
 
 const HORIZONS: Horizon[] = ['today', '7d', '30d', 'quarter', 'year']
 
@@ -180,7 +182,7 @@ const BLUEPRINTS: Blueprint[] = [
     intensity: 1.62,
     summary:
       'The latest week is materially above the adjusted weekly rhythm, with the lift persisting after weekend normalization.',
-    secondarySignals: ['Quarter pacing elevated'],
+    secondarySignals: ['90-day pace elevated'],
     tags: ['Pattern break', 'Local hotspot'],
     whyItMatters:
       'High 7-day severity is being reinforced by spillover into adjacent Bronx boards, so this reads as a real neighborhood run-up rather than one event.',
@@ -208,11 +210,11 @@ const BLUEPRINTS: Blueprint[] = [
     base: 388,
     intensity: 1.36,
     summary:
-      'Quarter-to-date complaints are running ahead of the seasonal quarter path and are projecting toward a top-tail finish.',
+      'Over the last 90 days, complaints are running ahead of the expected path and are landing near the top tail of comparable windows.',
     secondarySignals: ['30-day shift confirmed'],
     tags: ['Projected top tail'],
     whyItMatters:
-      'This is both broad and persistent, which makes the projected quarter-end total unusually hard to dismiss as calendar noise.',
+      'This is both broad and persistent, which makes the current 90-day total unusually hard to dismiss as calendar noise.',
   },
   {
     id: 'sewer-bk6-catch-basin',
@@ -266,7 +268,7 @@ const BLUEPRINTS: Blueprint[] = [
     intensity: 1.56,
     summary:
       'The last week is outpacing the expected seasonal burst and still compounding after weekend adjustment.',
-    secondarySignals: ['Quarter pace elevated'],
+    secondarySignals: ['90-day pace elevated'],
     tags: ['Storm-adjacent'],
     whyItMatters:
       'The queue score is being driven by both breadth and impact, which is exactly the type of borough-wide run that should surface near the top.',
@@ -279,11 +281,11 @@ const BLUEPRINTS: Blueprint[] = [
     base: 214,
     intensity: 1.29,
     summary:
-      'Year-to-date complaints are running above the annual template and are still projecting into an unusually high finish.',
-    secondarySignals: ['Quarter also elevated'],
+      'Over the last 12 months, complaints are running above the annual template and remain near the top tail of comparable windows.',
+    secondarySignals: ['90-day also elevated'],
     tags: ['Projected year extreme'],
     whyItMatters:
-      'A lower daily severity can still matter when the cumulative volume is this large and the projected finish stays near the top tail of comparable years.',
+      'A lower daily severity can still matter when the cumulative volume is this large and the trailing 12-month total stays near the top tail of comparable years.',
   },
   {
     id: 'street-mn3',
@@ -293,7 +295,7 @@ const BLUEPRINTS: Blueprint[] = [
     base: 48,
     intensity: 1.47,
     summary:
-      'Quarter-to-date counts are climbing above the seasonal path fast enough to threaten an extreme local quarter finish.',
+      'Over the last 90 days, counts have climbed above the expected path fast enough to mark an extreme local run.',
     secondarySignals: ['30-day shift confirmed'],
     tags: ['Localized quarter risk'],
     whyItMatters:
@@ -321,8 +323,8 @@ const BLUEPRINTS: Blueprint[] = [
     base: 172,
     intensity: 1.31,
     summary:
-      'Year-to-date volume is sustaining above the annual template and remains on pace for an unusually high finish.',
-    secondarySignals: ['Quarter also elevated'],
+      'Over the last 12 months, volume is sustaining above the annual template and remains unusually high.',
+    secondarySignals: ['90-day also elevated'],
     tags: ['Broad city signal'],
     whyItMatters:
       'The anomaly is both broad and cumulative, so the citywide roll-up communicates the story more clearly than any one local geography.',
@@ -366,7 +368,7 @@ const BLUEPRINTS: Blueprint[] = [
     intensity: 1.88,
     summary:
       'The last week is materially above the adjusted weekly path and is not fading after the first surge.',
-    secondarySignals: ['Quarter watch'],
+    secondarySignals: ['90-day watch'],
     tags: ['Specific driver'],
     whyItMatters:
       'A single detail is explaining most of the recent excess, so surfacing the child series is more informative than a generic parent alert.',
@@ -437,7 +439,7 @@ const BLUEPRINTS: Blueprint[] = [
     base: 74,
     intensity: 1.43,
     summary:
-      'Quarter-to-date counts are pacing well above the expected quarter profile and are still climbing.',
+      'Over the last 90 days, counts are pacing well above the expected path and are still climbing.',
     secondarySignals: ['30-day shift confirmed'],
     tags: ['Borough quarter run'],
     whyItMatters:
@@ -467,7 +469,7 @@ const BLUEPRINTS: Blueprint[] = [
     intensity: 1.68,
     summary:
       'The last month has shifted above the expected range and remained there, suggesting a real service issue rather than one event.',
-    secondarySignals: ['Quarter watch'],
+    secondarySignals: ['90-day watch'],
     tags: ['Local quality issue'],
     whyItMatters:
       'The board-level series is sufficiently specific and persistent that it explains the anomaly better than a borough-level water alert.',
@@ -481,7 +483,7 @@ const BLUEPRINTS: Blueprint[] = [
     base: 138,
     intensity: 1.28,
     summary:
-      'Brooklyn is running ahead of the expected quarter path and is pacing toward an unusually high local finish.',
+      'Over the last 90 days, Brooklyn is running ahead of the expected path and is sustaining an unusually high local total.',
     secondarySignals: ['30-day shift confirmed'],
     tags: ['Cumulative pressure'],
     whyItMatters:
@@ -497,7 +499,7 @@ const BLUEPRINTS: Blueprint[] = [
     intensity: 1.24,
     direction: 'down',
     summary:
-      'Year-to-date volume is running below the annual template and is projecting into an unusually quiet finish.',
+      'Over the last 12 months, volume is running below the annual template and is sitting in an unusually quiet range.',
     tags: ['Systemic drop'],
     whyItMatters:
       'The scale and breadth make a sustained negative anomaly notable, especially when it may reflect routing or compliance changes instead of a single local improvement.',
@@ -512,7 +514,7 @@ const BLUEPRINTS: Blueprint[] = [
     intensity: 1.57,
     summary:
       'The month-like window is above the expected range and still climbing instead of normalizing.',
-    secondarySignals: ['Quarter watch'],
+    secondarySignals: ['90-day watch'],
     tags: ['Specific driver'],
     whyItMatters:
       'The anomaly stays local and detail-explained, which is exactly when the queue should choose the more specific child series.',
@@ -540,8 +542,8 @@ const BLUEPRINTS: Blueprint[] = [
     base: 33,
     intensity: 1.33,
     summary:
-      'Year-to-date litter complaints are still pacing above the annual path and have not mean-reverted.',
-    secondarySignals: ['Quarter elevated'],
+      'Over the last 12 months, litter complaints are still running above the annual path and have not mean-reverted.',
+    secondarySignals: ['90-day elevated'],
     tags: ['Long-horizon drift'],
     whyItMatters:
       'The signal is persistent enough to matter and specific enough that the detail series is more useful than the parent category.',
@@ -664,10 +666,6 @@ function getDayOfYear(date: Date) {
   return Math.floor(diff / 86400000)
 }
 
-function getStartOfQuarter(date: Date) {
-  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1)
-}
-
 function getGeography(id: string) {
   const geography = ALL_GEOGRAPHIES.find((item) => item.id === id)
 
@@ -697,15 +695,10 @@ function getWindowDays(horizon: Horizon) {
   }
 
   if (horizon === 'quarter') {
-    return Math.max(
-      1,
-      Math.round(
-        (TODAY.getTime() - getStartOfQuarter(TODAY).getTime()) / 86400000,
-      ) + 1,
-    )
+    return TRAILING_90_DAY_WINDOW
   }
 
-  return Math.max(1, Math.round((TODAY.getTime() - new Date(TODAY.getFullYear(), 0, 1).getTime()) / 86400000) + 1)
+  return TRAILING_12_MONTH_WINDOW
 }
 
 function createAnalyticsTimeline(blueprint: Blueprint) {
@@ -713,8 +706,6 @@ function createAnalyticsTimeline(blueprint: Blueprint) {
   const direction = blueprint.direction === 'down' ? -1 : 1
   const totalDays = Math.round((TODAY.getTime() - ANALYTICS_START.getTime()) / 86400000) + 1
   const points: DailyPoint[] = []
-  const quarterStartIso = toIsoDate(getStartOfQuarter(TODAY))
-  const yearStartIso = `${TODAY.getFullYear()}-01-01`
 
   for (let dayIndex = 0; dayIndex < totalDays; dayIndex += 1) {
     const date = addDays(ANALYTICS_START, dayIndex)
@@ -748,18 +739,26 @@ function createAnalyticsTimeline(blueprint: Blueprint) {
       }
     }
 
-    if (blueprint.horizon === 'quarter' && isoDate >= quarterStartIso) {
-      const progress =
-        (date.getTime() - getStartOfQuarter(TODAY).getTime()) /
-        Math.max(86400000, TODAY.getTime() - getStartOfQuarter(TODAY).getTime())
-      effect = 1 + (blueprint.intensity - 1) * (0.2 + progress * 0.8)
+    if (blueprint.horizon === 'quarter') {
+      const daysFromEnd = totalDays - dayIndex - 1
+
+      if (daysFromEnd < TRAILING_90_DAY_WINDOW) {
+        const progress =
+          (TRAILING_90_DAY_WINDOW - daysFromEnd - 1) /
+          Math.max(1, TRAILING_90_DAY_WINDOW - 1)
+        effect = 1 + (blueprint.intensity - 1) * (0.2 + progress * 0.8)
+      }
     }
 
-    if (blueprint.horizon === 'year' && isoDate >= yearStartIso) {
-      const progress =
-        (date.getTime() - new Date(TODAY.getFullYear(), 0, 1).getTime()) /
-        Math.max(86400000, TODAY.getTime() - new Date(TODAY.getFullYear(), 0, 1).getTime())
-      effect = 1 + (blueprint.intensity - 1) * (0.18 + progress * 0.82)
+    if (blueprint.horizon === 'year') {
+      const daysFromEnd = totalDays - dayIndex - 1
+
+      if (daysFromEnd < TRAILING_12_MONTH_WINDOW) {
+        const progress =
+          (TRAILING_12_MONTH_WINDOW - daysFromEnd - 1) /
+          Math.max(1, TRAILING_12_MONTH_WINDOW - 1)
+        effect = 1 + (blueprint.intensity - 1) * (0.18 + progress * 0.82)
+      }
     }
 
     const noise = 0.92 + random() * 0.16 + Math.sin(localProgress * Math.PI * 6) * 0.02
@@ -872,7 +871,7 @@ function createHorizonScores(
 
   scores[blueprint.horizon] = clamp(baseScore + lift, 4.4, 9.3)
 
-  if (blueprint.secondarySignals?.some((label) => label.includes('Quarter'))) {
+  if (blueprint.secondarySignals?.some((label) => label.includes('90-day') || label.includes('Quarter'))) {
     scores.quarter = clamp(scores.quarter + 0.7, 2.2, 8.8)
   }
 
@@ -1050,7 +1049,7 @@ function createQueueReason(blueprint: Blueprint, dominantScore: number) {
     return `Severity ${dominantScore.toFixed(1)} with ${blueprint.secondarySignals[0].toLowerCase()}`
   }
 
-  return `Severity ${dominantScore.toFixed(1)} on the dominant ${blueprint.horizon} horizon`
+  return `Severity ${dominantScore.toFixed(1)} on the dominant ${formatHorizonLabel(blueprint.horizon)} horizon`
 }
 
 function createAlertRecord(blueprint: Blueprint): AlertRecord {
@@ -1201,7 +1200,7 @@ function createQuietEntity(problem: string, detail?: string): EntityRecord {
     name: detail ?? problem,
     parentProblem: detail ? problem : undefined,
     sparkline: createSparkline(analyticsTimeline),
-    summary: `Currently quiet. The highest residual watch is on the ${defaultHorizon} horizon, but it stays below queue threshold.`,
+    summary: `Currently quiet. The highest residual watch is on the ${formatHorizonLabel(defaultHorizon)} horizon, but it stays below queue threshold.`,
     timeline,
     type: detail ? 'detail' : 'problem',
   }
@@ -1285,7 +1284,7 @@ function buildEntity(alerts: AlertRecord[], problem: string, detail?: string) {
     sparkline: topAlert.sparkline,
     summary:
       currentStatus === 'active'
-        ? `${topAlert.geography.shortLabel} is the clearest live view for this category, with the signal reading strongest on ${topAlert.horizon}.`
+        ? `${topAlert.geography.shortLabel} is the clearest live view for this category, with the signal reading strongest on ${formatHorizonLabel(topAlert.horizon)}.`
         : `This category is on watch but not in the queue.`,
     timeline: topAlert.timeline,
     topAlertId: topAlert.id,
