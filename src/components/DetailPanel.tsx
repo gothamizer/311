@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import {
   compactSummary,
@@ -28,8 +28,28 @@ interface DetailPanelProps {
   selection: DetailSelection
 }
 
+const STACK_PERIODS_STORAGE_KEY = 'dashboard:stack-periods'
+
 function getDefaultChartHorizon(baseHorizon: AlertRecord['horizon'] | EntityRecord['defaultHorizon']): ChartHorizon {
   return baseHorizon === 'today' ? '7d' : baseHorizon
+}
+
+function readStoredStackPeriods() {
+  if (typeof window === 'undefined') {
+    return undefined
+  }
+
+  const raw = window.localStorage.getItem(STACK_PERIODS_STORAGE_KEY)
+
+  if (raw === 'true') {
+    return true
+  }
+
+  if (raw === 'false') {
+    return false
+  }
+
+  return undefined
 }
 
 function SignalBar({
@@ -63,23 +83,21 @@ export function DetailPanel({
 }: DetailPanelProps) {
   const entity = selection.kind === 'entity' ? selection.entity : undefined
   const alert = selection.kind === 'alert' ? selection.alert : selection.topAlert
-  const selectionKey = selection.kind === 'alert' ? selection.alert.id : selection.entity.id
   const baseHorizon =
     selection.kind === 'alert'
       ? selection.alert.horizon
       : selection.entity.defaultHorizon
   const defaultChartHorizon = getDefaultChartHorizon(baseHorizon)
-  const stateFallback = {
-    horizon: defaultChartHorizon,
-    selectionKey,
-    stackPeriods:
-      defaultChartHorizon === 'quarter' || defaultChartHorizon === 'year',
-  }
-  const [chartState, setChartState] = useState(stateFallback)
-  const effectiveChartState =
-    chartState.selectionKey === selectionKey ? chartState : stateFallback
-  const chartHorizon = effectiveChartState.horizon
-  const stackPeriods = effectiveChartState.stackPeriods
+  const [chartHorizon, setChartHorizon] = useState(defaultChartHorizon)
+  const [stackPeriods, setStackPeriods] = useState(() => {
+    const stored = readStoredStackPeriods()
+
+    if (typeof stored === 'boolean') {
+      return stored
+    }
+
+    return defaultChartHorizon === 'quarter' || defaultChartHorizon === 'year'
+  })
   const title =
     selection.kind === 'alert'
       ? selection.alert.title
@@ -98,6 +116,14 @@ export function DetailPanel({
     selection.kind === 'alert'
       ? selection.alert.artifacts
       : entity?.artifacts ?? []
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(STACK_PERIODS_STORAGE_KEY, String(stackPeriods))
+  }, [stackPeriods])
 
   return (
     <AnimatePresence mode="wait">
@@ -225,13 +251,7 @@ export function DetailPanel({
                 key={value}
                 className={`chart-control ${chartHorizon === value ? 'is-active' : ''}`}
                 type="button"
-                onClick={() =>
-                  setChartState({
-                    ...effectiveChartState,
-                    horizon: value,
-                    selectionKey,
-                  })
-                }
+                onClick={() => setChartHorizon(value)}
               >
                 {label}
               </button>
@@ -243,13 +263,7 @@ export function DetailPanel({
               <input
                 checked={stackPeriods}
                 type="checkbox"
-                onChange={(event) =>
-                  setChartState({
-                    ...effectiveChartState,
-                    selectionKey,
-                    stackPeriods: event.target.checked,
-                  })
-                }
+                onChange={(event) => setStackPeriods(event.target.checked)}
               />
               <span>Stack periods</span>
             </label>
