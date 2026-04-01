@@ -327,6 +327,17 @@ export function DetailPanel({
                 </label>
               </div>
             ) : null}
+
+            <div className="detail-panel__inline-legend" aria-hidden="true">
+              <span className="detail-panel__inline-legend-item">
+                <span className="detail-panel__inline-swatch detail-panel__inline-swatch--actual" />
+                Actual
+              </span>
+              <span className="detail-panel__inline-legend-item">
+                <span className="detail-panel__inline-swatch detail-panel__inline-swatch--expected" />
+                Expected
+              </span>
+            </div>
           </div>
         </div>
 

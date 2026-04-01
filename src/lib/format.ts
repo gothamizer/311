@@ -17,6 +17,11 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
   day: 'numeric',
 })
 
+const shortMonthYear = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  year: '2-digit',
+})
+
 const fullDate = new Intl.DateTimeFormat('en-US', {
   month: 'short',
   day: 'numeric',
@@ -41,6 +46,10 @@ function parseDateValue(value: string) {
 
 export function formatDateLabel(value: string) {
   return shortDate.format(parseDateValue(value))
+}
+
+export function formatMonthYearLabel(value: string) {
+  return shortMonthYear.format(parseDateValue(value))
 }
 
 export function formatFullDate(value: string) {

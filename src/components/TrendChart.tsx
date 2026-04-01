@@ -7,7 +7,7 @@ import {
   YAxis,
 } from 'recharts'
 
-import { formatCount, formatDateLabel } from '../lib/format'
+import { formatCount, formatDateLabel, formatMonthYearLabel } from '../lib/format'
 import type { ChartHorizon, ChartSmoothness, DailyPoint } from '../types'
 
 interface TrendChartProps {
@@ -36,7 +36,7 @@ interface ChartRow {
 }
 
 interface PreparedChart {
-  axis: 'date' | 'month' | 'relative'
+  axis: 'date' | 'month' | 'relative' | 'month-slot'
   comparisonLabels: string[]
   comparisonTotals: number[]
   rows: ChartRow[]
@@ -54,33 +54,16 @@ const SMOOTHNESS_WINDOW: Record<ChartSmoothness, number> = {
   '7pt': 7,
 }
 
-const monthTick = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  year: '2-digit',
-})
-
 const weekdayTick = new Intl.DateTimeFormat('en-US', {
   weekday: 'short',
 })
 
+const monthOnlyTick = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+})
+
 function parseDate(value: string) {
   return new Date(`${value}T12:00:00`)
-}
-
-function toIsoDate(date: Date) {
-  return date.toISOString().slice(0, 10)
-}
-
-function addDays(date: Date, days: number) {
-  const next = new Date(date)
-  next.setDate(next.getDate() + days)
-  return next
-}
-
-function shiftYears(date: Date, years: number) {
-  const next = new Date(date)
-  next.setFullYear(next.getFullYear() + years)
-  return next
 }
 
 function toPeriodPoint(point: DailyPoint): PeriodPoint {
@@ -91,13 +74,32 @@ function toPeriodPoint(point: DailyPoint): PeriodPoint {
   }
 }
 
-function extractWindow(points: DailyPoint[], start: Date, end: Date) {
-  return points
-    .filter((point) => {
-      const date = parseDate(point.date)
-      return date >= start && date <= end
-    })
-    .map(toPeriodPoint)
+function monthKey(value: string) {
+  return value.slice(0, 7)
+}
+
+function aggregateMonthly(points: PeriodPoint[]) {
+  const grouped = new Map<string, PeriodPoint>()
+
+  for (const point of points) {
+    const key = monthKey(point.date)
+    const existing = grouped.get(key)
+
+    if (existing) {
+      existing.actual += point.actual
+      existing.expected += point.expected
+      existing.date = point.date
+      continue
+    }
+
+    grouped.set(key, { ...point })
+  }
+
+  return Array.from(grouped.values())
+}
+
+function formatMonthRangeLabel(startDate: string, endDate: string) {
+  return `${formatMonthYearLabel(startDate)}-${formatMonthYearLabel(endDate)}`
 }
 
 function sumPoints(points: PeriodPoint[]) {
@@ -113,6 +115,10 @@ function sumPoints(points: PeriodPoint[]) {
 function sliceCurrentPeriod(points: DailyPoint[], horizon: Exclude<ChartHorizon, 'full'>) {
   if (horizon === '7d') {
     return points.slice(-7).map(toPeriodPoint)
+  }
+
+  if (horizon === 'year') {
+    return aggregateMonthly(points.map(toPeriodPoint)).slice(-12)
   }
 
   const trailingDays =
@@ -151,14 +157,25 @@ function previousTrailingWindowSets(points: DailyPoint[], currentRows: PeriodPoi
   })
 }
 
-function previousTrailingYearSets(points: DailyPoint[], finalDate: Date, currentLength: number) {
+function previousCalendarYearSets(points: DailyPoint[], finalDate: Date, currentLength: number) {
+  const monthlyPoints = aggregateMonthly(points.map(toPeriodPoint))
+  const currentMonthKey = monthKey(finalDate.toISOString().slice(0, 10))
+  const currentEndIndex = monthlyPoints.findLastIndex((point) => monthKey(point.date) === currentMonthKey)
+  const safeEndIndex = currentEndIndex >= 0 ? currentEndIndex : monthlyPoints.length - 1
+
   return [1, 2, 3].map((offset) => {
-    const end = shiftYears(finalDate, -offset)
-    const start = addDays(end, -(currentLength - 1))
+    const endIndex = safeEndIndex - currentLength * offset
+    const startIndex = Math.max(0, endIndex - currentLength + 1)
+    const rows = monthlyPoints.slice(startIndex, endIndex + 1)
+    const startDate = rows[0]?.date
+    const endDate = rows.at(-1)?.date
 
     return {
-      label: String(end.getFullYear()),
-      rows: extractWindow(points, start, end),
+      label:
+        startDate && endDate
+          ? formatMonthRangeLabel(startDate, endDate)
+          : `Prior year ${offset}`,
+      rows,
     }
   })
 }
@@ -179,7 +196,11 @@ function previousComparableSets(
     return previousTrailingWindowSets(points, currentRows, '30D')
   }
 
-  return previousTrailingYearSets(points, finalDate, currentLength)
+  if (horizon === 'quarter') {
+    return previousTrailingWindowSets(points, currentRows, 'Quarter')
+  }
+
+  return previousCalendarYearSets(points, finalDate, currentLength)
 }
 
 function currentPeriodChart(
@@ -194,7 +215,12 @@ function currentPeriodChart(
   const totals = sumPoints(currentRows)
 
   return {
-    axis: stackPeriods ? 'relative' : 'date',
+    axis:
+      horizon === 'year'
+        ? 'month-slot'
+        : stackPeriods
+          ? 'relative'
+          : 'date',
     comparisonLabels: comparisonSets.map((set) => set.label),
     comparisonTotals: comparisonSets.map((set) => sumPoints(set.rows).actual),
     rows: currentRows.map((point, index) => ({
@@ -400,7 +426,18 @@ function formatRelativeTick(
     return `Week ${Math.floor(slot / 7) + 1}`
   }
 
-  return monthTick.format(parseDate(point.date))
+  return formatMonthYearLabel(point.date)
+}
+
+function formatMonthSlotTick(slotValue: number, rows: ChartRow[]) {
+  const slot = Number(slotValue)
+  const point = rows[slot]
+
+  if (!point) {
+    return ''
+  }
+
+  return monthOnlyTick.format(parseDate(point.date))
 }
 
 function LegendItem({
@@ -445,36 +482,40 @@ export function TrendChart({
   const currentStart = chart.rows[0]?.date
   const currentEnd = chart.rows.at(-1)?.date
   const currentWindowLabel =
-    stackPeriods && currentStart && currentEnd
-      ? `Current window: ${formatDateLabel(currentStart)} to ${formatDateLabel(currentEnd)}`
+    (stackPeriods || horizon === 'year') && currentStart && currentEnd
+      ? `Current window: ${
+        horizon === 'year'
+          ? `${formatMonthYearLabel(currentStart)} to ${formatMonthYearLabel(currentEnd)}`
+          : `${formatDateLabel(currentStart)} to ${formatDateLabel(currentEnd)}`
+      }`
       : undefined
 
   return (
     <div className="trend-chart">
-      <div className="trend-chart__bar">
-        <div className="trend-chart__legend">
-          <LegendItem color={actualColor} label="Actual" />
-          <LegendItem color={accentColor} dashed label="Expected" />
-          {stackPeriods
-            ? chart.comparisonLabels.map((label, index) => (
-                <LegendItem
-                  color={
-                    index === 0
-                      ? compare1Color
-                      : index === 1
-                        ? compare2Color
-                        : compare3Color
-                  }
-                  key={label}
-                  label={label}
-                />
-              ))
-            : null}
+      {stackPeriods || currentWindowLabel ? (
+        <div className="trend-chart__bar">
+          <div className="trend-chart__legend trend-chart__legend--compare">
+            {stackPeriods
+              ? chart.comparisonLabels.map((label, index) => (
+                  <LegendItem
+                    color={
+                      index === 0
+                        ? compare1Color
+                        : index === 1
+                          ? compare2Color
+                          : compare3Color
+                    }
+                    key={label}
+                    label={label}
+                  />
+                ))
+              : null}
+          </div>
+          {currentWindowLabel ? (
+            <div className="trend-chart__window-label">{currentWindowLabel}</div>
+          ) : null}
         </div>
-        {currentWindowLabel ? (
-          <div className="trend-chart__window-label">{currentWindowLabel}</div>
-        ) : null}
-      </div>
+      ) : null}
 
       <div className="trend-chart__surface">
         <ResponsiveContainer width="100%" height={316}>
@@ -482,12 +523,20 @@ export function TrendChart({
             <CartesianGrid stroke="rgba(229, 233, 241, 0.08)" vertical={false} />
             <XAxis
               axisLine={false}
-              dataKey={chart.axis === 'relative' ? 'slot' : 'date'}
-              minTickGap={chart.axis === 'month' ? 28 : chart.axis === 'relative' ? 18 : 20}
+              dataKey={chart.axis === 'relative' || chart.axis === 'month-slot' ? 'slot' : 'date'}
+              minTickGap={
+                chart.axis === 'month'
+                  ? 28
+                  : chart.axis === 'relative' || chart.axis === 'month-slot'
+                    ? 18
+                    : 20
+              }
               tick={{ fill: 'rgba(225, 227, 233, 0.64)', fontSize: 11 }}
               tickFormatter={(value) =>
                 chart.axis === 'month'
-                  ? monthTick.format(parseDate(value))
+                  ? formatMonthYearLabel(value)
+                  : chart.axis === 'month-slot'
+                    ? formatMonthSlotTick(Number(value), chart.rows)
                   : chart.axis === 'relative' && relativeHorizon
                     ? formatRelativeTick(Number(value), relativeHorizon, chart.rows)
                     : formatDateLabel(value)
