@@ -40,6 +40,19 @@ export function formatDelta(deltaPct: number) {
   return `${percentNumber.format(Math.round(deltaPct))}%`
 }
 
+// Standard deviations from the baseline, signed. Magnitudes are capped on the data
+// side; here we just present them consistently (e.g. "+6.9σ", "−2.3σ").
+export function formatSigma(sigma: number) {
+  const rounded = Math.round(sigma * 10) / 10
+
+  if (rounded === 0) {
+    return '0σ'
+  }
+
+  const sign = rounded > 0 ? '+' : '−'
+  return `${sign}${Math.abs(rounded).toFixed(1)}σ`
+}
+
 function parseDateValue(value: string) {
   return new Date(value.length === 10 ? `${value}T12:00:00` : value)
 }
@@ -112,14 +125,6 @@ export function compactSummary(summary: string, horizon: Horizon) {
 
   compact = summary.replace(/^Year-to-date\s+/i, 'Over the last 12 months, ')
   return sentenceCase(compact)
-}
-
-export function formatPercentile(percentile: number) {
-  if (percentile >= 50) {
-    return `Top ${Math.max(1, 100 - Math.round(percentile))}%`
-  }
-
-  return `Bottom ${Math.max(1, Math.round(percentile))}%`
 }
 
 export function clamp(value: number, min: number, max: number) {

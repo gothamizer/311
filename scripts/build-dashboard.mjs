@@ -151,9 +151,8 @@ async function main() {
   }
 
   const detailIndex = buildDetailIndex(detailEvaluations)
-  const detailBySeriesKey = new Map(detailEvaluations.map((evaluation) => [evaluation.seriesKey, evaluation]))
 
-  const problemAlerts = selectProblemAlerts(problemEvaluations, detailIndex, detailBySeriesKey)
+  const problemAlerts = selectProblemAlerts(problemEvaluations, detailIndex)
   const allAlerts = mergeGeographyDuplicates(problemAlerts).sort((left, right) => right.priority - left.priority)
   const alertRecords = allAlerts.map((evaluation) =>
     buildAlertRecord(evaluation, detailIndex, problemEvaluations),
@@ -652,15 +651,18 @@ function createSeriesEvaluation(input) {
   const persistenceScore = clamp(input.persistence * 100, 0, 100)
   const evidenceScore = input.evidence?.score ?? buildEvidenceScore(severity, impactScore, persistenceScore)
   const confidenceScore = input.evidence?.confidence ?? 100
+  const deviationSigma = computeDeviationSigma(input.rawSignal, input.direction)
 
   return {
     actual: input.actual,
     artifacts: input.artifacts,
+    baselineLabel: baselineLabelForHorizon(input.dominantHorizon),
     comparableDays: input.comparableDays,
     comparableStart: DATE_KEYS[input.comparableStartIndex],
     counts: input.counts,
     dailyStd: input.dailyStd,
     deltaPct: round1(input.deltaPct),
+    deviationSigma,
     direction: input.direction,
     dominantHorizon: input.dominantHorizon,
     expected: input.expected,
@@ -1092,6 +1094,38 @@ function scoreSignal(horizon, signal) {
   return round1(Math.abs(signal.score))
 }
 
+// The dominant signal's score is already a standardized deviation: for the
+// daily/7d/30d windows it is a robust z-score against the history of equivalent
+// trailing windows; for quarter/year it is the residual divided by a MAD-based
+// scale of the same period-to-date across prior years. Both express "how many
+// standard deviations above (or below) the baseline this reading sits".
+function computeDeviationSigma(rawSignal, direction) {
+  if (!rawSignal || !Number.isFinite(rawSignal.score)) {
+    return 0
+  }
+
+  const magnitude = Math.abs(rawSignal.score)
+  const signed = direction === 'down' ? -magnitude : magnitude
+  return round1(signed)
+}
+
+// States what the standard deviation is measured against so the number is never
+// ambiguous across horizons.
+function baselineLabelForHorizon(horizon) {
+  switch (horizon) {
+    case 'today':
+      return 'vs a typical day'
+    case '7d':
+      return 'vs prior weeks'
+    case '30d':
+      return 'vs prior 30-day windows'
+    case 'quarter':
+      return 'vs the same quarter in prior years'
+    default:
+      return 'vs the same period in prior years'
+  }
+}
+
 function buildDetailIndex(detailEvaluations) {
   const byProblemGeography = new Map()
 
@@ -1109,7 +1143,11 @@ function buildDetailIndex(detailEvaluations) {
   return byProblemGeography
 }
 
-function selectProblemAlerts(problemEvaluations, detailIndex, detailBySeriesKey) {
+// Alerts are always surfaced at the problem level. Descriptor-level detail is no
+// longer promoted to stand in for the problem; instead every problem alert carries
+// its details as a breakdown (see buildDetails) that the UI exposes as badges and
+// an in-place filter.
+function selectProblemAlerts(problemEvaluations, detailIndex) {
   const alerts = []
 
   for (const evaluation of problemEvaluations) {
@@ -1118,25 +1156,9 @@ function selectProblemAlerts(problemEvaluations, detailIndex, detailBySeriesKey)
     }
 
     const candidateDetails = detailIndex.get(`${evaluation.problem}|${evaluation.geography.id}`) ?? []
-    const parentExcess = Math.max(0, sumRecentExcess(evaluation.timeline, 30))
-    const bestDetail = candidateDetails.find((detail) => {
-      const detailExcess = Math.max(0, sumRecentExcess(detail.timeline, 30))
-      return detail.status === 'active' &&
-        detail.priority >= evaluation.priority * 0.8 &&
-        detailExcess >= parentExcess * 0.6
-    })
-
-    if (bestDetail) {
-      bestDetail.artifacts = mergeArtifacts(bestDetail.artifacts, detectTaxonomyArtifact(evaluation, candidateDetails))
-      bestDetail.priority = finalizePriority(bestDetail, problemEvaluations)
-      if (bestDetail.priority >= ACTIVE_PRIORITY_FLOOR) {
-        alerts.push(bestDetail)
-      }
-      continue
-    }
-
     evaluation.artifacts = mergeArtifacts(evaluation.artifacts, detectTaxonomyArtifact(evaluation, candidateDetails))
     evaluation.priority = finalizePriority(evaluation, problemEvaluations)
+
     if (evaluation.priority >= ACTIVE_PRIORITY_FLOOR) {
       alerts.push(evaluation)
     }
@@ -1200,16 +1222,18 @@ function mergeGeographyDuplicates(alerts) {
 
 function buildAlertRecord(evaluation, detailIndex, problemEvaluations) {
   const map = buildDistrictMap(evaluation.problem, evaluation.dominantHorizon, problemEvaluations, evaluation.geography.id)
-  const contributors = buildContributors(evaluation, detailIndex)
+  const details = buildDetails(evaluation, detailIndex)
   const idBase = `${slugify(evaluation.problem)}-${evaluation.detail ? `${slugify(evaluation.detail)}-` : ''}${evaluation.geography.id}-${evaluation.dominantHorizon}`
   const id = `${idBase}-${hashString(`${evaluation.seriesKey}|${evaluation.dominantHorizon}`)}`
 
   return {
     actual: evaluation.actual,
     artifacts: evaluation.artifacts,
+    baselineLabel: evaluation.baselineLabel,
     comparabilityStart: evaluation.comparableStart,
-    contributors,
     deltaPct: round1(evaluation.deltaPct),
+    details,
+    deviationSigma: evaluation.deviationSigma,
     direction: evaluation.direction,
     expected: evaluation.expected,
     geography: evaluation.geography,
@@ -1218,19 +1242,14 @@ function buildAlertRecord(evaluation, detailIndex, problemEvaluations) {
     horizonScores: evaluation.horizonScores,
     id,
     map,
-    priority: evaluation.priority,
     problem: evaluation.problem,
-    projectedPercentile: evaluation.projectedPercentile,
-    queueReason: evaluation.queueReason,
     secondarySignals: evaluation.secondarySignals,
-    signal: evaluation.signal,
     sparkline: evaluation.sparkline,
     summary: evaluation.summary,
     surfaceLevel: evaluation.level,
     tags: evaluation.tags,
     timeline: evaluation.timeline,
     title: evaluation.title,
-    whyItMatters: evaluation.whyItMatters,
     detail: evaluation.detail,
   }
 }
@@ -1274,9 +1293,9 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
     entities.push({
       activeAlertCount: activeRelated.length,
       artifacts: [...new Set(related.flatMap((evaluation) => evaluation.artifacts))],
-      contributors: buildContributors(top, detailIndex),
       currentStatus: activeRelated.length ? 'active' : getEntityEvaluationStatus(top),
       defaultHorizon: top.dominantHorizon,
+      details: buildDetails(top, detailIndex),
       geographyBreakdown,
       historyTimeline: top.historyTimeline,
       horizonScores: maxHorizonScores(related),
@@ -1326,9 +1345,9 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
     entities.push({
       activeAlertCount: activeRelated.length,
       artifacts: [...new Set(related.flatMap((evaluation) => evaluation.artifacts))],
-      contributors: buildContributors(top, detailIndex),
       currentStatus,
       defaultHorizon: top.dominantHorizon,
+      details: buildDetails(top, detailIndex),
       geographyBreakdown,
       historyTimeline: top.historyTimeline,
       horizonScores: maxHorizonScores(related),
@@ -1393,7 +1412,11 @@ function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeograph
     const expected = evaluation
       ? roundCount(sumRecentExpected(evaluation.timeline, windowSize))
       : 0
-    const intensity = expected > 0 ? actual / expected : 1
+    // A board only carries a usable signal when we actually observed volume for
+    // this problem there. Boards with no data are left neutral on the map instead
+    // of being painted as if they were exactly on baseline.
+    const hasData = Boolean(evaluation) && (actual > 0 || expected > 0)
+    const intensity = expected > 0 ? actual / expected : actual > 0 ? 2 : 1
 
     return {
       borough: board.borough,
@@ -1402,13 +1425,18 @@ function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeograph
       actual,
       code: board.code,
       expected,
+      hasData,
       intensity: round2(intensity),
       isFocus: selectedGeographyId === board.id,
     }
   })
 }
 
-function buildContributors(evaluation, detailIndex) {
+// Build the descriptor-level breakdown that the UI renders as badges. Each detail
+// is self-contained: headline numbers at the alert's horizon plus its own daily
+// timeline, so the front-end can filter the alert down to a single descriptor and
+// recompute the metric strip and trend chart exactly, without another fetch.
+function buildDetails(evaluation, detailIndex) {
   if (evaluation.level === 'detail') {
     return []
   }
@@ -1417,13 +1445,15 @@ function buildContributors(evaluation, detailIndex) {
   const rankedRows = rows
     .map((detailEvaluation) => {
       const metrics = getHorizonMetrics(detailEvaluation.timeline, evaluation.dominantHorizon)
+      const actual = roundCount(metrics.actual)
+      const expected = roundCount(metrics.expected)
 
       return {
-        actual: roundCount(metrics.actual),
+        actual,
         contribution: directionalContribution(metrics, evaluation.direction),
-        detailEvaluation,
-        expected: roundCount(metrics.expected),
+        expected,
         name: detailEvaluation.detail,
+        timeline: detailEvaluation.timeline,
       }
     })
     .filter((row) => row.name)
@@ -1438,13 +1468,32 @@ function buildContributors(evaluation, detailIndex) {
 
   return rankedRows
     .filter((row) => row.contribution > 0)
-    .slice(0, 5)
-    .map((row) => ({
-      actual: row.actual,
-      expected: row.expected,
-      name: row.name,
-      share: round1((row.contribution / Math.max(1, totalContribution)) * 100),
-    }))
+    .slice(0, 6)
+    .map((row) => {
+      const deltaPct = row.expected > 0 ? ((row.actual - row.expected) / row.expected) * 100 : 0
+
+      return {
+        actual: row.actual,
+        baselineLabel: evaluation.baselineLabel,
+        deltaPct: round1(deltaPct),
+        deviationSigma: standardizedDeviation(row.actual, row.expected, evaluation.direction),
+        direction: evaluation.direction,
+        expected: row.expected,
+        name: row.name,
+        // Contribution to the parent excess/deficit, expressed as a share.
+        share: round1((row.contribution / Math.max(1, totalContribution)) * 100),
+        timeline: row.timeline,
+      }
+    })
+}
+
+// A simple, signed standardized deviation consistent with how the rest of the
+// pipeline standardizes counts: residual over a Poisson-style scale. Used for the
+// per-detail badge tooltip where a full window/period refit would be overkill.
+function standardizedDeviation(actual, expected, direction) {
+  const residual = actual - expected
+  const sigma = residual / Math.sqrt(expected + 1)
+  return round1(direction === 'down' ? -Math.abs(sigma) : Math.abs(sigma))
 }
 
 function detectPanelWideBreak(problemEvaluations) {
@@ -1776,21 +1825,21 @@ function toAlertSummary(alert) {
   return {
     actual: alert.actual,
     artifacts: alert.artifacts,
+    baselineLabel: alert.baselineLabel,
     deltaPct: alert.deltaPct,
+    detail: alert.detail,
+    deviationSigma: alert.deviationSigma,
     direction: alert.direction,
     expected: alert.expected,
     geography: alert.geography,
     horizon: alert.horizon,
     horizonScores: alert.horizonScores,
     id: alert.id,
-    priority: alert.priority,
     problem: alert.problem,
-    projectedPercentile: alert.projectedPercentile,
     sparkline: alert.sparkline,
     summary: alert.summary,
     surfaceLevel: alert.surfaceLevel,
     title: alert.title,
-    detail: alert.detail,
   }
 }
 
