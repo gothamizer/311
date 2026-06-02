@@ -66,6 +66,10 @@ function parseDate(value: string) {
   return new Date(`${value}T12:00:00`)
 }
 
+function toIsoDate(value: Date) {
+  return value.toISOString().slice(0, 10)
+}
+
 function toPeriodPoint(point: DailyPoint): PeriodPoint {
   return {
     actual: point.actual,
@@ -96,10 +100,6 @@ function aggregateMonthly(points: PeriodPoint[]) {
   }
 
   return Array.from(grouped.values())
-}
-
-function formatMonthRangeLabel(startDate: string, endDate: string) {
-  return `${formatMonthYearLabel(startDate)}-${formatMonthYearLabel(endDate)}`
 }
 
 function sumPoints(points: PeriodPoint[]) {
@@ -135,10 +135,19 @@ function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
   const currentLength = currentRows.length
   const labels = ['Prev week', '2w ago', '3w ago']
 
-  return labels.map((label, index) => {
+  return labels.flatMap((label, index) => {
     const endIndex = points.length - currentLength * (index + 1)
-    const startIndex = Math.max(0, endIndex - currentLength)
+    const startIndex = endIndex - currentLength
+
+    if (startIndex < 0 || endIndex <= 0) {
+      return []
+    }
+
     const rows = points.slice(startIndex, endIndex).map(toPeriodPoint)
+
+    if (rows.length !== currentLength) {
+      return []
+    }
 
     return { label, rows }
   })
@@ -147,11 +156,20 @@ function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
 function previousTrailingWindowSets(points: DailyPoint[], currentRows: PeriodPoint[], unitLabel: string) {
   const currentLength = currentRows.length
 
-  return [1, 2, 3].map((offset) => {
+  return [1, 2, 3].flatMap((offset) => {
     const endIndex = points.length - currentLength * offset
-    const startIndex = Math.max(0, endIndex - currentLength)
+    const startIndex = endIndex - currentLength
+
+    if (startIndex < 0 || endIndex <= 0) {
+      return []
+    }
+
     const rows = points.slice(startIndex, endIndex).map(toPeriodPoint)
     const label = offset === 1 ? `Prev ${unitLabel}` : `${offset}x ${unitLabel} ago`
+
+    if (rows.length !== currentLength) {
+      return []
+    }
 
     return { label, rows }
   })
@@ -163,18 +181,22 @@ function previousCalendarYearSets(points: DailyPoint[], finalDate: Date, current
   const currentEndIndex = monthlyPoints.findLastIndex((point) => monthKey(point.date) === currentMonthKey)
   const safeEndIndex = currentEndIndex >= 0 ? currentEndIndex : monthlyPoints.length - 1
 
-  return [1, 2, 3].map((offset) => {
+  return [1, 2, 3].flatMap((offset) => {
     const endIndex = safeEndIndex - currentLength * offset
-    const startIndex = Math.max(0, endIndex - currentLength + 1)
+    const startIndex = endIndex - currentLength + 1
+
+    if (startIndex < 0 || endIndex < 0) {
+      return []
+    }
+
     const rows = monthlyPoints.slice(startIndex, endIndex + 1)
-    const startDate = rows[0]?.date
-    const endDate = rows.at(-1)?.date
+
+    if (rows.length !== currentLength) {
+      return []
+    }
 
     return {
-      label:
-        startDate && endDate
-          ? formatMonthRangeLabel(startDate, endDate)
-          : `Prior year ${offset}`,
+      label: offset === 1 ? 'Prev Year' : `${offset}x Year ago`,
       rows,
     }
   })

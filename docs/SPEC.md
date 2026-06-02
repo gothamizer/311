@@ -251,10 +251,10 @@ Default queueing rule:
   * dominant horizon severity is at least **4.5** in z-like units, or
   * two horizons each exceed **3.5**, or
   * projected quarter/year finish lands in the top or bottom **2%** of comparable history
-* home queue shows top **25** active alerts
+* home queue shows all current active alerts in priority order
 * lower-priority “watch” items appear only in the fixed-horizon panes and category explorer
 
-This keeps the main pane selective enough that users do not become numb to it.
+The main pane remains ordered by priority, while eligibility rules keep low-signal watch items out of the active queue.
 
 ## 10. Taxonomy and artifact handling
 

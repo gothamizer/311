@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
 import {
   compactSummary,
@@ -34,43 +34,24 @@ interface DetailPanelProps {
   selection: DetailSelection
 }
 
-const STACK_PERIODS_STORAGE_KEY = 'dashboard:stack-periods'
-const CHART_SMOOTHNESS_STORAGE_KEY = 'dashboard:chart-smoothness'
-
 function getDefaultChartHorizon(baseHorizon: AlertRecord['horizon'] | EntityRecord['defaultHorizon']): ChartHorizon {
   return baseHorizon === 'today' ? '7d' : baseHorizon
 }
 
-function readStoredStackPeriods() {
-  if (typeof window === 'undefined') {
-    return undefined
+function getDefaultChartSmoothness(chartHorizon: ChartHorizon): ChartSmoothness {
+  if (chartHorizon === '30d') {
+    return '3pt'
   }
 
-  const raw = window.localStorage.getItem(STACK_PERIODS_STORAGE_KEY)
-
-  if (raw === 'true') {
-    return true
+  if (chartHorizon === 'quarter') {
+    return '7pt'
   }
 
-  if (raw === 'false') {
-    return false
-  }
-
-  return undefined
+  return 'raw'
 }
 
-function readStoredSmoothness(): ChartSmoothness | undefined {
-  if (typeof window === 'undefined') {
-    return undefined
-  }
-
-  const raw = window.localStorage.getItem(CHART_SMOOTHNESS_STORAGE_KEY)
-
-  if (raw === 'raw' || raw === '3pt' || raw === '7pt') {
-    return raw
-  }
-
-  return undefined
+function getDefaultStackPeriods(chartHorizon: ChartHorizon) {
+  return chartHorizon === '7d' || chartHorizon === 'year'
 }
 
 function SignalBar({
@@ -109,18 +90,11 @@ export function DetailPanel({
       ? selection.alert.horizon
       : selection.entity.defaultHorizon
   const defaultChartHorizon = getDefaultChartHorizon(baseHorizon)
+  const defaultChartSmoothness = getDefaultChartSmoothness(defaultChartHorizon)
   const [chartHorizon, setChartHorizon] = useState(defaultChartHorizon)
-  const [stackPeriods, setStackPeriods] = useState(() => {
-    const stored = readStoredStackPeriods()
-
-    if (typeof stored === 'boolean') {
-      return stored
-    }
-
-    return defaultChartHorizon === 'quarter' || defaultChartHorizon === 'year'
-  })
+  const [stackPeriods, setStackPeriods] = useState(() => getDefaultStackPeriods(defaultChartHorizon))
   const [chartSmoothness, setChartSmoothness] = useState<ChartSmoothness>(
-    () => readStoredSmoothness() ?? 'raw',
+    defaultChartSmoothness,
   )
   const title =
     selection.kind === 'alert'
@@ -141,22 +115,7 @@ export function DetailPanel({
     selection.kind === 'alert'
       ? selection.alert.artifacts
       : entity?.artifacts ?? []
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    window.localStorage.setItem(STACK_PERIODS_STORAGE_KEY, String(stackPeriods))
-  }, [stackPeriods])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    window.localStorage.setItem(CHART_SMOOTHNESS_STORAGE_KEY, chartSmoothness)
-  }, [chartSmoothness])
+  const contributorShareLabel = direction === 'up' ? 'of current excess' : 'of current deficit'
 
   return (
     <AnimatePresence mode="wait">
@@ -284,7 +243,7 @@ export function DetailPanel({
                 ['30d', '30D'],
                 ['quarter', 'Quarter'],
                 ['year', 'Year'],
-                ['full', 'History'],
+                ['full', 'Full'],
               ] as const).map(([value, label]) => (
                 <button
                   key={value}
@@ -298,11 +257,11 @@ export function DetailPanel({
             </div>
 
             <div className="detail-panel__control-group detail-panel__control-group--inline">
-              <span className="detail-panel__control-label">Smoothness</span>
+              <span className="detail-panel__control-label">Trend line</span>
               {([
-                ['raw', 'Raw'],
-                ['3pt', '3pt'],
-                ['7pt', '7pt'],
+                ['raw', 'Daily'],
+                ['3pt', '3d avg'],
+                ['7pt', '7d avg'],
               ] as const).map(([value, label]) => (
                 <button
                   key={value}
@@ -357,37 +316,39 @@ export function DetailPanel({
             selectedGeographyId={selection.kind === 'alert' ? selection.alert.geography.id : undefined}
           />
 
-          <section className="detail-section">
-            <div className="detail-section__header">
-              <div>
-                <p className="section-kicker">Specificity</p>
-                <h3 className="section-title">Leading contributors</h3>
-              </div>
-            </div>
-            <div className="detail-table">
-              <div className="detail-table__header">
-                <span>Contributor</span>
-                <div className="detail-table__metrics detail-table__metrics--header">
-                  <span>Actual</span>
-                  <span>Expected</span>
+          {contributors.length ? (
+            <section className="detail-section">
+              <div className="detail-section__header">
+                <div>
+                  <p className="section-kicker">Specificity</p>
+                  <h3 className="section-title">Leading contributors</h3>
                 </div>
               </div>
-              {contributors.map((contributor) => (
-                <div key={contributor.name} className="detail-table__row">
-                  <div>
-                    <p className="detail-table__title">{contributor.name}</p>
-                    <p className="detail-table__sub">
-                      {contributor.share}% of recent excess
-                    </p>
-                  </div>
-                  <div className="detail-table__metrics">
-                    <span>{formatCount(contributor.actual)}</span>
-                    <span>{formatCount(contributor.expected)}</span>
+              <div className="detail-table">
+                <div className="detail-table__header">
+                  <span>Contributor</span>
+                  <div className="detail-table__metrics detail-table__metrics--header">
+                    <span>Actual</span>
+                    <span>Expected</span>
                   </div>
                 </div>
-              ))}
-            </div>
-          </section>
+                {contributors.map((contributor) => (
+                  <div key={contributor.name} className="detail-table__row">
+                    <div>
+                      <p className="detail-table__title">{contributor.name}</p>
+                      <p className="detail-table__sub">
+                        {contributor.share}% {contributorShareLabel}
+                      </p>
+                    </div>
+                    <div className="detail-table__metrics">
+                      <span>{formatCount(contributor.actual)}</span>
+                      <span>{formatCount(contributor.expected)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <section className="detail-section detail-section--stacked">
             <div className="detail-section__header">

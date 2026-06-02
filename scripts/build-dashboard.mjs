@@ -1,17 +1,24 @@
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
-const DATASET_ID = 'phws-rnrn'
+const DATASET_ID = 'erm2-nwe9'
 const SOCRATA_BASE_URL = `https://data.cityofnewyork.us/resource/${DATASET_ID}.json`
 const OUTPUT_ROOT = path.resolve('public/data')
 const ALERT_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'alerts')
 const ENTITY_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'entities')
 const INDEX_OUTPUT_PATH = path.join(OUTPUT_ROOT, 'dashboard-index.json')
-const WINDOW_DAYS = Number(process.env.DASHBOARD_WINDOW_DAYS ?? 365 * 3)
-const MAX_QUEUE = 25
+const WINDOW_DAYS = process.env.DASHBOARD_WINDOW_DAYS ? Number(process.env.DASHBOARD_WINDOW_DAYS) : undefined
+const WINDOW_YEARS = Number(process.env.DASHBOARD_WINDOW_YEARS ?? 5)
+const COMPLETENESS_LOOKBACK_DAYS = Number(process.env.DASHBOARD_COMPLETENESS_LOOKBACK_DAYS ?? 56)
+const COMPLETENESS_MIN_RATIO = Number(process.env.DASHBOARD_COMPLETENESS_MIN_RATIO ?? 0.65)
+const COMPLETENESS_MIN_PRIOR_WEEKS = Number(process.env.DASHBOARD_COMPLETENESS_MIN_PRIOR_WEEKS ?? 3)
+const COMPLETENESS_MIN_COUNT = Number(process.env.DASHBOARD_COMPLETENESS_MIN_COUNT ?? 1000)
+const FALLBACK_DATA_LAG_DAYS = Number(process.env.DASHBOARD_FALLBACK_DATA_LAG_DAYS ?? 3)
 const TOP_DETAIL_PROBLEM_COUNT = 15
 const PAGE_LIMIT = process.env.DASHBOARD_PAGE_LIMIT ? Number(process.env.DASHBOARD_PAGE_LIMIT) : undefined
 const PARTITION_MONTHS = Number(process.env.DASHBOARD_PARTITION_MONTHS ?? 3)
+const ACTIVE_PRIORITY_FLOOR = 58
+const LONG_HORIZON_ACTIVE_SCORE = 12
 const HORIZON_MINIMUMS = {
   today: { deltaPct: 35, diff: 2, volume: 3 },
   '7d': { deltaPct: 20, diff: 6, volume: 12 },
@@ -41,15 +48,24 @@ const BOROUGH_NAME_TO_ID = {
 }
 const VALID_BOROUGHS = new Set(Object.keys(BOROUGH_NAME_TO_ID))
 const CURRENT_DATE = new Date()
-const END_DATE = startOfDay(addDays(CURRENT_DATE, -1))
-const START_DATE = startOfDay(addDays(END_DATE, -(WINDOW_DAYS - 1)))
-const DATE_KEYS = buildDateKeys(START_DATE, END_DATE)
-const DATE_INDEX = new Map(DATE_KEYS.map((dateKey, index) => [dateKey, index]))
 const BOARD_DEFINITIONS = buildBoardDefinitions()
 const GEOGRAPHIES = buildGeographies()
 const GEOGRAPHY_BY_ID = new Map(GEOGRAPHIES.map((geography) => [geography.id, geography]))
+let END_DATE
+let START_DATE
+let DATE_KEYS
+let DATE_INDEX
 
 async function main() {
+  const completeness = await resolveCompleteEndDate()
+  END_DATE = completeness.endDate
+  START_DATE = resolveWindowStartDate(END_DATE)
+  DATE_KEYS = buildDateKeys(START_DATE, END_DATE)
+  DATE_INDEX = new Map(DATE_KEYS.map((dateKey, index) => [dateKey, index]))
+
+  console.log(
+    `Using ${formatDateKey(END_DATE)} as latest complete day (${completeness.reason})`,
+  )
   console.log(`Building dashboard for ${formatDateKey(START_DATE)} to ${formatDateKey(END_DATE)}`)
 
   const topDetailProblems = await fetchTopDetailProblems()
@@ -145,7 +161,7 @@ async function main() {
 
   const alertMap = new Map(alertRecords.map((alert) => [alert.id, alert]))
   const fixedHorizon = buildFixedHorizon(alertRecords)
-  const mainQueue = alertRecords.slice(0, MAX_QUEUE)
+  const mainQueue = alertRecords
 
   const entityIndex = buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, alertMap)
 
@@ -187,6 +203,77 @@ function buildBaseWhere(startDate, endDateExclusive, extraWhere = '') {
   }
 
   return clauses.join(' AND ')
+}
+
+function resolveWindowStartDate(endDate) {
+  if (WINDOW_DAYS) {
+    return startOfDay(addDays(endDate, -(WINDOW_DAYS - 1)))
+  }
+
+  return startOfDay(addDays(addYears(endDate, -WINDOW_YEARS), 1))
+}
+
+async function resolveCompleteEndDate() {
+  const rows = await fetchCompletenessCounts()
+  const todayKey = formatDateKey(startOfDay(CURRENT_DATE))
+  const candidates = rows
+    .filter((row) => row.date < todayKey)
+    .sort((left, right) => right.date.localeCompare(left.date))
+
+  for (const candidate of candidates) {
+    const candidateDate = parseDateKey(candidate.date)
+    const weekday = candidateDate.getUTCDay()
+    const olderRows = rows.filter((row) => row.date < candidate.date)
+    const sameWeekdayCounts = olderRows
+      .filter((row) => parseDateKey(row.date).getUTCDay() === weekday)
+      .map((row) => row.count)
+      .slice(0, 8)
+    const baselineCounts =
+      sameWeekdayCounts.length >= COMPLETENESS_MIN_PRIOR_WEEKS
+        ? sameWeekdayCounts
+        : olderRows.map((row) => row.count).slice(0, 28)
+
+    if (!baselineCounts.length) {
+      continue
+    }
+
+    const baseline = median(baselineCounts)
+    const threshold = Math.max(COMPLETENESS_MIN_COUNT, baseline * COMPLETENESS_MIN_RATIO)
+
+    if (candidate.count >= threshold) {
+      return {
+        endDate: candidateDate,
+        reason: `${candidate.count} rows vs ${Math.round(threshold)} completeness threshold`,
+      }
+    }
+  }
+
+  const fallbackEndDate = startOfDay(addDays(CURRENT_DATE, -FALLBACK_DATA_LAG_DAYS))
+
+  return {
+    endDate: fallbackEndDate,
+    reason: `fallback ${FALLBACK_DATA_LAG_DAYS} day lag; completeness preflight found no candidate`,
+  }
+}
+
+async function fetchCompletenessCounts() {
+  const startDate = startOfDay(addDays(CURRENT_DATE, -COMPLETENESS_LOOKBACK_DAYS))
+  const endExclusive = startOfDay(addDays(CURRENT_DATE, 1))
+  const params = new URLSearchParams({
+    $group: 'day',
+    $limit: String(COMPLETENESS_LOOKBACK_DAYS + 2),
+    $order: 'day DESC',
+    $select: 'date_trunc_ymd(created_date) as day, count(*) as n',
+    $where: buildBaseWhere(startDate, endExclusive),
+  })
+  const rows = await fetchJsonWithRetry(`${SOCRATA_BASE_URL}?${params.toString()}`, 'completeness')
+
+  return rows
+    .map((row) => ({
+      count: Number(row.n),
+      date: row.day.slice(0, 10),
+    }))
+    .filter((row) => row.date && Number.isFinite(row.count))
 }
 
 async function fetchTopDetailProblems() {
@@ -247,8 +334,7 @@ async function fetchAggregates({ group, label, limit, order, select, where }) {
       $where: where,
     })
     console.log(`[${label}] page ${pageCount + 1} offset ${offset}`)
-    const response = await fetchWithRetry(`${SOCRATA_BASE_URL}?${params.toString()}`, label)
-    const page = await response.json()
+    const page = await fetchJsonWithRetry(`${SOCRATA_BASE_URL}?${params.toString()}`, label)
 
     rows.push(...page)
     pageCount += 1
@@ -265,6 +351,22 @@ async function fetchAggregates({ group, label, limit, order, select, where }) {
   }
 
   return rows
+}
+
+async function fetchJsonWithRetry(url, label, attempt = 0) {
+  try {
+    const response = await fetchWithRetry(url, label, attempt)
+    return await response.json()
+  } catch (error) {
+    if (attempt >= 4) {
+      throw error
+    }
+
+    const backoffMs = 1_000 * (attempt + 1)
+    console.log(`[${label}] retry ${attempt + 1} after response read error`)
+    await new Promise((resolve) => setTimeout(resolve, backoffMs))
+    return fetchJsonWithRetry(url, label, attempt + 1)
+  }
 }
 
 async function fetchWithRetry(url, label, attempt = 0) {
@@ -426,7 +528,7 @@ function evaluateSeries(series, options) {
   const sparse = comparableDays < 56 || zeroRate > 0.6 || meanDaily < 1
   const expected = buildExpectedSeries(counts, comparableStartIndex)
   const dailyStd = counts.map((value, index) => (value - expected[index]) / Math.sqrt(expected[index] + 1))
-  const todaySignal = buildWindowSignal(dailyStd, 1, comparableStartIndex)
+  const todaySignal = buildWindowSignalFromCounts(counts, expected, 1, comparableStartIndex)
   const sevenDaySignal = buildWindowSignalFromCounts(counts, expected, 7, comparableStartIndex)
   const thirtyDaySignal = buildWindowSignalFromCounts(counts, expected, 30, comparableStartIndex)
   const quarterSignal = buildPeriodSignal(counts, expected, 'quarter', comparableStartIndex)
@@ -436,8 +538,8 @@ function evaluateSeries(series, options) {
     today: sparse ? 0 : scoreSignal('today', todaySignal),
     '7d': scoreSignal('7d', sevenDaySignal),
     '30d': scoreSignal('30d', thirtyDaySignal),
-    quarter: scoreSignal('quarter', quarterSignal),
-    year: scoreSignal('year', yearSignal),
+    quarter: comparableDays >= 365 ? scoreSignal('quarter', quarterSignal) : 0,
+    year: comparableDays >= 730 ? scoreSignal('year', yearSignal) : 0,
   }
   const dominantHorizon = HORIZONS.reduce((best, current) =>
     horizonScores[current] > horizonScores[best] ? current : best,
@@ -449,10 +551,6 @@ function evaluateSeries(series, options) {
     quarter: quarterSignal,
     year: yearSignal,
   }[dominantHorizon]
-  const extremeProjectedPercentile = quarterSignal.projectedPercentile <= 5 ||
-    quarterSignal.projectedPercentile >= 95 ||
-    yearSignal.projectedPercentile <= 5 ||
-    yearSignal.projectedPercentile >= 95
   const strongSignals = Object.values(horizonScores).filter((score) => score >= 3.5).length
   const artifacts = []
 
@@ -466,8 +564,26 @@ function evaluateSeries(series, options) {
   const deltaPct = expectedValue > 0 ? ((actual - expectedValue) / expectedValue) * 100 : 0
   const persistence = computePersistence(dailyStd, dominantHorizon, direction)
   const impact = Math.abs(actual - expectedValue)
+  const timelineExpected = dominantSignal.expectedSeries ?? expected
+  const evidence = buildSignalEvidence({
+    artifacts,
+    comparableDays,
+    deltaPct,
+    dominantHorizon,
+    horizonScore: horizonScores[dominantHorizon],
+    impact,
+    persistence,
+    signal: dominantSignal,
+  })
+  const hasVisibleEvidence = evidence.score >= 48 && evidence.confidence >= 45
+  const dominantLongHorizon = dominantHorizon === 'quarter' || dominantHorizon === 'year'
+  const hasActiveEvidence = hasVisibleEvidence && (
+    dominantLongHorizon
+      ? horizonScores[dominantHorizon] >= LONG_HORIZON_ACTIVE_SCORE
+      : horizonScores[dominantHorizon] >= 4.5 || strongSignals >= 2
+  )
 
-  if (!(horizonScores[dominantHorizon] >= 4.5 || strongSignals >= 2 || extremeProjectedPercentile)) {
+  if (!hasActiveEvidence) {
     return createSeriesEvaluation({
       actual,
       artifacts,
@@ -480,6 +596,7 @@ function evaluateSeries(series, options) {
       direction,
       dominantHorizon,
       expected: expectedValue,
+      evidence,
       horizonScores,
       options,
       persistence,
@@ -491,9 +608,9 @@ function evaluateSeries(series, options) {
           : undefined,
       rawSignal: dominantSignal,
       series,
-      status: horizonScores[dominantHorizon] >= 4.5 || strongSignals >= 2 || extremeProjectedPercentile ? 'active' : 'watch',
-      timeline: buildTimeline(counts, expected),
-      historyTimeline: buildQuarterlyHistoryTimeline(counts, expected),
+      status: 'watch',
+      timeline: buildTimeline(counts, timelineExpected),
+      historyTimeline: buildQuarterlyHistoryTimeline(counts, timelineExpected),
       impact,
     })
   }
@@ -510,6 +627,7 @@ function evaluateSeries(series, options) {
     direction,
     dominantHorizon,
     expected: expectedValue,
+    evidence,
     horizonScores,
     options,
     persistence,
@@ -522,16 +640,18 @@ function evaluateSeries(series, options) {
     rawSignal: dominantSignal,
     series,
     status: 'active',
-    timeline: buildTimeline(counts, expected),
-    historyTimeline: buildQuarterlyHistoryTimeline(counts, expected),
+    timeline: buildTimeline(counts, timelineExpected),
+    historyTimeline: buildQuarterlyHistoryTimeline(counts, timelineExpected),
     impact,
   })
 }
 
 function createSeriesEvaluation(input) {
   const severity = clamp(input.horizonScores[input.dominantHorizon] * 14, 0, 100)
-  const impactScore = clamp(Math.log1p(input.impact) * 16, 0, 100)
+  const impactScore = buildImpactScore(input.impact, input.deltaPct)
   const persistenceScore = clamp(input.persistence * 100, 0, 100)
+  const evidenceScore = input.evidence?.score ?? buildEvidenceScore(severity, impactScore, persistenceScore)
+  const confidenceScore = input.evidence?.confidence ?? 100
 
   return {
     actual: input.actual,
@@ -566,6 +686,8 @@ function createSeriesEvaluation(input) {
     signal: {
       artifactPenalty: 0,
       breadth: 0,
+      confidence: confidenceScore,
+      evidence: evidenceScore,
       impact: impactScore,
       persistence: persistenceScore,
       severity,
@@ -578,6 +700,89 @@ function createSeriesEvaluation(input) {
   }
 }
 
+function buildSignalEvidence({
+  artifacts,
+  comparableDays,
+  deltaPct,
+  dominantHorizon,
+  horizonScore,
+  impact,
+  persistence,
+  signal,
+}) {
+  const severity = clamp(horizonScore * 14, 0, 100)
+  const impactScore = buildImpactScore(impact, deltaPct)
+  const persistenceScore = clamp(persistence * 100, 0, 100)
+  const evidenceScore = buildEvidenceScore(severity, impactScore, persistenceScore)
+  const confidenceScore = buildConfidenceScore({
+    artifacts,
+    comparableDays,
+    comparisonCount: signal.comparisonCount,
+    horizon: dominantHorizon,
+  })
+
+  return {
+    confidence: confidenceScore,
+    score: evidenceScore,
+  }
+}
+
+function buildEvidenceScore(severity, impactScore, persistenceScore) {
+  return clamp(
+    severity * 0.78 +
+    persistenceScore * 0.14 +
+    impactScore * 0.08,
+    0,
+    100,
+  )
+}
+
+function buildImpactScore(impact, deltaPct) {
+  const relativeImpact = clamp((Math.log1p(Math.abs(deltaPct)) / Math.log1p(300)) * 100, 0, 100)
+  const absoluteImpact = clamp(Math.log1p(impact) * 12, 0, 100)
+
+  return relativeImpact * 0.65 + absoluteImpact * 0.35
+}
+
+function buildConfidenceScore({ artifacts, comparableDays, comparisonCount, horizon }) {
+  const comparisonMinimums = {
+    today: 60,
+    '7d': 45,
+    '30d': 30,
+    quarter: 4,
+    year: 4,
+  }
+  const historyMinimums = {
+    today: 84,
+    '7d': 180,
+    '30d': 365,
+    quarter: 365,
+    year: 730,
+  }
+  const comparisonFloor = horizon === 'quarter' || horizon === 'year' ? 0.25 : 0.55
+  const comparisonConfidence = typeof comparisonCount === 'number'
+    ? clamp(comparisonCount / comparisonMinimums[horizon], comparisonFloor, 1)
+    : 1
+  const historyConfidence = clamp(comparableDays / historyMinimums[horizon], 0.6, 1)
+  const artifactFactor = artifacts.reduce((factor, artifact) => {
+    if (artifact === 'Panel-wide break') {
+      return factor * 0.65
+    }
+
+    if (artifact === 'Possible taxonomy artifact') {
+      return factor * 0.75
+    }
+
+    if (artifact === 'Limited history') {
+      return horizon === 'quarter' || horizon === 'year' ? factor * 0.9 : factor
+    }
+
+    return factor
+  }, 1)
+
+  return clamp(comparisonConfidence * historyConfidence * artifactFactor * 100, 0, 100)
+}
+
 function detectComparableStart(counts) {
   const firstNonZero = counts.findIndex((value) => value > 0)
 
@@ -585,22 +790,7 @@ function detectComparableStart(counts) {
     return counts.length - 1
   }
 
-  let latestBreak = firstNonZero
-
-  for (let index = Math.max(56, firstNonZero + 56); index < counts.length - 56; index += 7) {
-    const before = counts.slice(index - 56, index)
-    const after = counts.slice(index, index + 56)
-    const beforeMedian = median(before)
-    const afterMedian = median(after)
-    const levelShift = Math.abs(afterMedian - beforeMedian) / Math.max(1, beforeMedian)
-    const zeroShift = Math.abs(zeroRate(before) - zeroRate(after))
-
-    if (levelShift >= 0.35 || zeroShift >= 0.25) {
-      latestBreak = index
-    }
-  }
-
-  return latestBreak
+  return firstNonZero
 }
 
 function buildExpectedSeries(counts, comparableStartIndex) {
@@ -679,7 +869,9 @@ function buildWindowSignalFromCounts(counts, expected, windowSize, comparableSta
   if (standardized.length === 0) {
     return {
       actual: 0,
+      comparisonCount: 0,
       expected: 0,
+      percentileScore: 0,
       projectedPercentile: 50,
       raw: 0,
       score: 0,
@@ -692,7 +884,9 @@ function buildWindowSignalFromCounts(counts, expected, windowSize, comparableSta
 
   return {
     actual: latest.actual,
+    comparisonCount: history.length,
     expected: latest.expected,
+    percentileScore: 0,
     projectedPercentile: 50,
     raw: latest.raw,
     score,
@@ -709,7 +903,9 @@ function buildWindowSignal(dailyStd, windowSize, comparableStartIndex) {
   if (standardized.length === 0) {
     return {
       actual: 0,
+      comparisonCount: 0,
       expected: 0,
+      percentileScore: 0,
       projectedPercentile: 50,
       raw: 0,
       score: 0,
@@ -721,7 +917,9 @@ function buildWindowSignal(dailyStd, windowSize, comparableStartIndex) {
 
   return {
     actual: 0,
+    comparisonCount: history.length,
     expected: 0,
+    percentileScore: 0,
     projectedPercentile: 50,
     raw: latest,
     score: robustScore(latest, history),
@@ -731,12 +929,14 @@ function buildWindowSignal(dailyStd, windowSize, comparableStartIndex) {
 function buildPeriodSignal(counts, expected, periodType, comparableStartIndex) {
   const currentPeriod = getCurrentPeriodBounds(periodType)
   const startIndex = DATE_INDEX.get(currentPeriod.start)
-  const endIndex = DATE_INDEX.get(currentPeriod.end)
+  const endIndex = counts.length - 1
 
   if (startIndex === undefined || endIndex === undefined || endIndex < startIndex) {
     return {
       actual: 0,
+      comparisonCount: 0,
       expected: 0,
+      percentileScore: 0,
       projectedPercentile: 50,
       raw: 0,
       score: 0,
@@ -745,13 +945,9 @@ function buildPeriodSignal(counts, expected, periodType, comparableStartIndex) {
 
   const progressLength = endIndex - startIndex + 1
   const actual = sumRange(counts, startIndex, endIndex)
-  const expectedValue = sumRange(expected, startIndex, endIndex)
-  const raw = (actual - expectedValue) / Math.sqrt(expectedValue + 1)
-  const comparableValues = []
-  const projectedTotals = []
-  const fullPeriodLengths = []
+  const comparablePeriods = []
 
-  for (const periodStart of listPriorPeriodStarts(periodType, currentPeriod.start)) {
+  for (const periodStart of listPriorComparablePeriodStarts(periodType, currentPeriod.start)) {
     const periodStartIndex = DATE_INDEX.get(periodStart)
 
     if (periodStartIndex === undefined || periodStartIndex < comparableStartIndex) {
@@ -768,28 +964,119 @@ function buildPeriodSignal(counts, expected, periodType, comparableStartIndex) {
 
     const comparableActual = sumRange(counts, periodStartIndex, priorProgressEndIndex)
     const comparableExpected = sumRange(expected, periodStartIndex, priorProgressEndIndex)
-    comparableValues.push((comparableActual - comparableExpected) / Math.sqrt(comparableExpected + 1))
-
     const fullActual = sumRange(counts, periodStartIndex, priorPeriodEndIndex)
-    projectedTotals.push(fullActual)
-    fullPeriodLengths.push(priorPeriodEndIndex - periodStartIndex + 1)
+    const fullExpected = sumRange(expected, periodStartIndex, priorPeriodEndIndex)
+
+    comparablePeriods.push({
+      actual: comparableActual,
+      expected: comparableExpected,
+      fullActual,
+      fullExpected,
+    })
   }
 
-  const fullPeriodDays = currentPeriod.totalDays
-  const elapsedDays = progressLength
-  const expectedRemaining = sumRange(expected, endIndex + 1, Math.min(counts.length - 1, startIndex + fullPeriodDays - 1))
-  const paceRatio = actual / Math.max(1, expectedValue)
-  const projectedFinish = actual + expectedRemaining * paceRatio
-  const projectedPercentile = percentileRank(projectedTotals, projectedFinish)
-  const percentileScore = percentileExtremeness(projectedPercentile)
+  const comparableActuals = comparablePeriods.map((period) => period.actual)
+  const aggregateBaseline = buildAggregatePeriodBaseline([...comparableActuals].reverse())
+  const expectedValue = aggregateBaseline.expected
+  const raw = (actual - expectedValue) / Math.sqrt(expectedValue + 1)
+  const residual = actual - expectedValue
+  const residualScale = buildAggregateResidualScale(aggregateBaseline.residuals, expectedValue)
+  const residualScore = residual / residualScale
+  const projectedPercentile = percentileRank(comparableActuals, actual)
+  const percentileScore = comparablePeriods.length >= minimumProjectedComparisons(periodType)
+    ? percentileExtremeness(projectedPercentile)
+    : 0
+  const expectedSeries = buildAggregateExpectedSeries(expected, startIndex, endIndex, expectedValue)
+  const score = residualScore
 
   return {
     actual,
+    comparisonCount: comparablePeriods.length,
     expected: expectedValue,
+    expectedSeries,
+    percentileScore,
     projectedPercentile,
     raw,
-    score: Math.max(Math.abs(robustScore(raw, comparableValues)), percentileScore) * Math.sign(raw || 1),
+    score,
   }
+}
+
+function minimumProjectedComparisons(periodType) {
+  return periodType === 'year' ? 4 : 4
+}
+
+function buildAggregatePeriodBaseline(values) {
+  if (!values.length) {
+    return {
+      expected: 0,
+      fitted: [],
+      residuals: [],
+    }
+  }
+
+  if (values.length < 3) {
+    const expected = values.at(-1) ?? 0
+
+    return {
+      expected,
+      fitted: values.map(() => expected),
+      residuals: values.map((value) => value - expected),
+    }
+  }
+
+  const slope = theilSenSlope(values)
+  const xValues = values.map((_, index) => index + 1)
+  const intercept = median(values.map((value, index) => value - slope * xValues[index]))
+  const fitted = xValues.map((xValue) => Math.max(0, intercept + slope * xValue))
+  const residuals = values.map((value, index) => value - fitted[index])
+  const trendExpected = Math.max(0, intercept + slope * (values.length + 1))
+  const recentExpected = values.length >= 2
+    ? values.at(-1) * 0.7 + values.at(-2) * 0.3
+    : values.at(-1)
+  const expected = Math.max(0, trendExpected * 0.7 + recentExpected * 0.3)
+
+  return {
+    expected,
+    fitted,
+    residuals,
+  }
+}
+
+function theilSenSlope(values) {
+  const slopes = []
+
+  for (let left = 0; left < values.length; left += 1) {
+    for (let right = left + 1; right < values.length; right += 1) {
+      slopes.push((values[right] - values[left]) / (right - left))
+    }
+  }
+
+  return median(slopes)
+}
+
+function buildAggregateResidualScale(residuals, expectedValue) {
+  const absoluteResiduals = residuals.map((value) => Math.abs(value - median(residuals)))
+  const residualScale = median(absoluteResiduals) * 1.4826
+  const poissonScale = Math.sqrt(expectedValue + 1)
+  const practicalScale = expectedValue * 0.12
+
+  return Math.max(1, residualScale, poissonScale, practicalScale)
+}
+
+function buildAggregateExpectedSeries(baseExpected, startIndex, endIndex, expectedTotal) {
+  const nextExpected = [...baseExpected]
+  const baseTotal = sumRange(baseExpected, startIndex, endIndex)
+  const windowLength = endIndex - startIndex + 1
+
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    const share = baseTotal > 0
+      ? baseExpected[index] / baseTotal
+      : 1 / Math.max(1, windowLength)
+
+    nextExpected[index] = expectedTotal * share
+  }
+
+  return nextExpected
 }
 
 function scoreSignal(horizon, signal) {
@@ -826,7 +1113,7 @@ function selectProblemAlerts(problemEvaluations, detailIndex, detailBySeriesKey)
   const alerts = []
 
   for (const evaluation of problemEvaluations) {
-    if (evaluation.status !== 'active' && evaluation.horizonScores[evaluation.dominantHorizon] < 2.8) {
+    if (evaluation.status !== 'active') {
       continue
     }
 
@@ -834,19 +1121,25 @@ function selectProblemAlerts(problemEvaluations, detailIndex, detailBySeriesKey)
     const parentExcess = Math.max(0, sumRecentExcess(evaluation.timeline, 30))
     const bestDetail = candidateDetails.find((detail) => {
       const detailExcess = Math.max(0, sumRecentExcess(detail.timeline, 30))
-      return detail.priority >= evaluation.priority * 0.8 && detailExcess >= parentExcess * 0.6
+      return detail.status === 'active' &&
+        detail.priority >= evaluation.priority * 0.8 &&
+        detailExcess >= parentExcess * 0.6
     })
 
     if (bestDetail) {
       bestDetail.artifacts = mergeArtifacts(bestDetail.artifacts, detectTaxonomyArtifact(evaluation, candidateDetails))
       bestDetail.priority = finalizePriority(bestDetail, problemEvaluations)
-      alerts.push(bestDetail)
+      if (bestDetail.priority >= ACTIVE_PRIORITY_FLOOR) {
+        alerts.push(bestDetail)
+      }
       continue
     }
 
     evaluation.artifacts = mergeArtifacts(evaluation.artifacts, detectTaxonomyArtifact(evaluation, candidateDetails))
     evaluation.priority = finalizePriority(evaluation, problemEvaluations)
-    alerts.push(evaluation)
+    if (evaluation.priority >= ACTIVE_PRIORITY_FLOOR) {
+      alerts.push(evaluation)
+    }
   }
 
   return alerts.sort((left, right) => right.priority - left.priority)
@@ -860,13 +1153,14 @@ function finalizePriority(evaluation, allProblemEvaluations) {
     0,
   )
   const score = (
-    evaluation.signal.severity * 0.45 +
-    evaluation.signal.impact * 0.25 +
-    evaluation.signal.persistence * 0.15 +
-    evaluation.signal.breadth * 0.1 +
+    evaluation.signal.evidence * 0.72 +
+    evaluation.signal.severity * 0.07 +
+    evaluation.signal.impact * 0.08 +
+    evaluation.signal.persistence * 0.08 +
+    evaluation.signal.breadth * 0.08 +
     evaluation.signal.specificity * 0.05 -
     evaluation.signal.artifactPenalty
-  )
+  ) * (evaluation.signal.confidence / 100)
   evaluation.priority = Math.max(0, Math.min(100, Math.round(score)))
   evaluation.summary = createSummary(evaluation)
   evaluation.whyItMatters = createWhyItMatters(evaluation)
@@ -907,7 +1201,8 @@ function mergeGeographyDuplicates(alerts) {
 function buildAlertRecord(evaluation, detailIndex, problemEvaluations) {
   const map = buildDistrictMap(evaluation.problem, evaluation.dominantHorizon, problemEvaluations, evaluation.geography.id)
   const contributors = buildContributors(evaluation, detailIndex)
-  const id = `${slugify(evaluation.problem)}-${evaluation.detail ? `${slugify(evaluation.detail)}-` : ''}${evaluation.geography.id}-${evaluation.dominantHorizon}`
+  const idBase = `${slugify(evaluation.problem)}-${evaluation.detail ? `${slugify(evaluation.detail)}-` : ''}${evaluation.geography.id}-${evaluation.dominantHorizon}`
+  const id = `${idBase}-${hashString(`${evaluation.seriesKey}|${evaluation.dominantHorizon}`)}`
 
   return {
     actual: evaluation.actual,
@@ -972,14 +1267,15 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
         expected: evaluation.expected,
         geography: evaluation.geography,
         priority: evaluation.priority,
-        status: evaluation.priority >= 78 ? 'active' : evaluation.priority >= 58 ? 'watch' : 'quiet',
+        status: getEntityEvaluationStatus(evaluation),
       }))
+    const activeRelated = related.filter((evaluation) => getEntityEvaluationStatus(evaluation) === 'active')
 
     entities.push({
-      activeAlertCount: related.filter((evaluation) => evaluation.priority >= 78).length,
+      activeAlertCount: activeRelated.length,
       artifacts: [...new Set(related.flatMap((evaluation) => evaluation.artifacts))],
       contributors: buildContributors(top, detailIndex),
-      currentStatus: top.priority >= 78 ? 'active' : top.priority >= 58 ? 'watch' : 'quiet',
+      currentStatus: activeRelated.length ? 'active' : getEntityEvaluationStatus(top),
       defaultHorizon: top.dominantHorizon,
       geographyBreakdown,
       historyTimeline: top.historyTimeline,
@@ -1022,14 +1318,16 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
         expected: evaluation.expected,
         geography: evaluation.geography,
         priority: evaluation.priority,
-        status: evaluation.priority >= 78 ? 'active' : evaluation.priority >= 58 ? 'watch' : 'quiet',
+        status: getEntityEvaluationStatus(evaluation),
       }))
+    const activeRelated = related.filter((evaluation) => getEntityEvaluationStatus(evaluation) === 'active')
+    const currentStatus = activeRelated.length ? 'active' : getEntityEvaluationStatus(top)
 
     entities.push({
-      activeAlertCount: related.filter((evaluation) => evaluation.priority >= 78).length,
+      activeAlertCount: activeRelated.length,
       artifacts: [...new Set(related.flatMap((evaluation) => evaluation.artifacts))],
       contributors: buildContributors(top, detailIndex),
-      currentStatus: top.priority >= 78 ? 'active' : top.priority >= 58 ? 'watch' : 'quiet',
+      currentStatus,
       defaultHorizon: top.dominantHorizon,
       geographyBreakdown,
       historyTimeline: top.historyTimeline,
@@ -1039,7 +1337,7 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
       name: detail,
       parentProblem: problem,
       sparkline: top.sparkline,
-      summary: `${detail} is on ${top.priority >= 78 ? 'active' : top.priority >= 58 ? 'watch' : 'quiet'} within ${problem}, led by ${top.geography.shortLabel}.`,
+      summary: `${detail} is on ${currentStatus} within ${problem}, led by ${top.geography.shortLabel}.`,
       timeline: top.timeline,
       topAlertId: [...alertMap.values()].find(
         (alert) => alert.problem === problem && alert.detail === detail,
@@ -1058,6 +1356,18 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
 
     return left.name.localeCompare(right.name)
   })
+}
+
+function getEntityEvaluationStatus(evaluation) {
+  if (evaluation.status === 'active') {
+    return 'active'
+  }
+
+  if (evaluation.priority >= ACTIVE_PRIORITY_FLOOR) {
+    return 'watch'
+  }
+
+  return 'quiet'
 }
 
 function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeographyId) {
@@ -1100,34 +1410,40 @@ function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeograph
 
 function buildContributors(evaluation, detailIndex) {
   if (evaluation.level === 'detail') {
-    const siblings = detailIndex.get(`${evaluation.problem}|${evaluation.geography.id}`) ?? []
-
-    return siblings
-      .slice(0, 5)
-      .map((detailEvaluation) => ({
-        actual: detailEvaluation.actual,
-        expected: detailEvaluation.expected,
-        name: detailEvaluation.detail,
-        share: round1(
-          (Math.max(0, detailEvaluation.actual - detailEvaluation.expected) /
-            Math.max(1, siblings.reduce((sum, row) => sum + Math.max(0, row.actual - row.expected), 0))) *
-            100,
-        ),
-      }))
+    return []
   }
 
   const rows = detailIndex.get(`${evaluation.problem}|${evaluation.geography.id}`) ?? []
-  const totalExcess = rows.reduce((sum, row) => sum + Math.max(0, row.actual - row.expected), 0)
+  const rankedRows = rows
+    .map((detailEvaluation) => {
+      const metrics = getHorizonMetrics(detailEvaluation.timeline, evaluation.dominantHorizon)
 
-  return rows
+      return {
+        actual: roundCount(metrics.actual),
+        contribution: directionalContribution(metrics, evaluation.direction),
+        detailEvaluation,
+        expected: roundCount(metrics.expected),
+        name: detailEvaluation.detail,
+      }
+    })
+    .filter((row) => row.name)
+    .sort((left, right) => {
+      if (right.contribution !== left.contribution) {
+        return right.contribution - left.contribution
+      }
+
+      return Math.abs(right.actual - right.expected) - Math.abs(left.actual - left.expected)
+    })
+  const totalContribution = rankedRows.reduce((sum, row) => sum + row.contribution, 0)
+
+  return rankedRows
+    .filter((row) => row.contribution > 0)
     .slice(0, 5)
-    .map((detailEvaluation) => ({
-      actual: detailEvaluation.actual,
-      expected: detailEvaluation.expected,
-      name: detailEvaluation.detail,
-      share: round1(
-        (Math.max(0, detailEvaluation.actual - detailEvaluation.expected) / Math.max(1, totalExcess)) * 100,
-      ),
+    .map((row) => ({
+      actual: row.actual,
+      expected: row.expected,
+      name: row.name,
+      share: round1((row.contribution / Math.max(1, totalContribution)) * 100),
     }))
 }
 
@@ -1210,10 +1526,9 @@ function computePersistence(dailyStd, horizon, direction) {
 }
 
 function buildTimeline(counts, expected) {
-  const startIndex = Math.max(0, counts.length - 540)
   const points = []
 
-  for (let index = startIndex; index < counts.length; index += 1) {
+  for (let index = 0; index < counts.length; index += 1) {
     points.push({
       actual: roundCount(counts[index]),
       date: DATE_KEYS[index],
@@ -1286,33 +1601,39 @@ function buildSparkline(counts, horizon) {
 }
 
 function createSummary(evaluation) {
+  const period = describeAlertPeriod(evaluation)
+  const directionText = evaluation.direction === 'up' ? 'above' : 'below'
+  const comparisonText = formatComparisonText(evaluation)
+
   if (evaluation.dominantHorizon === 'today') {
-    return evaluation.direction === 'up'
-      ? 'Today is running well above the adjusted baseline after a steadier recent run.'
-      : 'Today fell sharply below the adjusted baseline after a steadier recent run.'
+    const supportingWindows = HORIZONS
+      .filter(
+        (horizon) =>
+          horizon !== 'today' &&
+          evaluation.horizonScores[horizon] >= 3.25,
+      )
+      .map(formatHorizon)
+
+    if (supportingWindows.length) {
+      return `${period} recorded ${comparisonText}. ${formatList(supportingWindows)} ${supportingWindows.length === 1 ? 'is' : 'are'} elevated as well.`
+    }
+
+    return `${period} recorded ${comparisonText}.`
   }
 
   if (evaluation.dominantHorizon === '7d') {
-    return evaluation.direction === 'up'
-      ? 'The last week is materially above the adjusted path and does not read as a routine weekly peak.'
-      : 'The last week is materially below the adjusted path and breaks the recent weekly rhythm.'
+    return `${period} totaled ${comparisonText}, ${directionText} the expected level.`
   }
 
   if (evaluation.dominantHorizon === '30d') {
-    return evaluation.direction === 'up'
-      ? 'The last month has shifted into a higher regime instead of fading after a short burst.'
-      : 'The last month has shifted into a lower regime instead of reverting toward its usual path.'
+    return `${period} totaled ${comparisonText}, ${directionText} the expected level.`
   }
 
   if (evaluation.dominantHorizon === 'quarter') {
-    return evaluation.direction === 'up'
-      ? 'Quarter to date is running ahead of the expected path and is landing in an unusually high historical tail.'
-      : 'Quarter to date is running below the expected path and is landing in an unusually low historical tail.'
+    return `${period} totaled ${comparisonText}, using a trend-adjusted same-season quarter-to-date baseline.`
   }
 
-  return evaluation.direction === 'up'
-    ? 'Year to date is on pace for an unusually high finish relative to recent comparable years.'
-    : 'Year to date is on pace for an unusually low finish relative to recent comparable years.'
+  return `${period} totaled ${comparisonText}, using a trend-adjusted year-to-date baseline.`
 }
 
 function createWhyItMatters(evaluation) {
@@ -1327,17 +1648,21 @@ function createWhyItMatters(evaluation) {
 }
 
 function createQueueReason(evaluation) {
-  if (evaluation.projectedPercentile !== undefined && (evaluation.projectedPercentile <= 5 || evaluation.projectedPercentile >= 95)) {
-    return `${formatHorizon(evaluation.dominantHorizon)} projected finish is in a historical tail.`
+  if (
+    (evaluation.dominantHorizon === 'quarter' || evaluation.dominantHorizon === 'year') &&
+    evaluation.projectedPercentile !== undefined &&
+    (evaluation.projectedPercentile <= 5 || evaluation.projectedPercentile >= 95)
+  ) {
+    return `${formatHorizon(evaluation.dominantHorizon)} is elevated after accounting for recent same-period trend.`
   }
 
   const strongSignals = HORIZONS.filter((horizon) => evaluation.horizonScores[horizon] >= 3.5)
 
   if (strongSignals.length >= 2) {
-    return `Multiple horizons are elevated, led by ${formatHorizon(evaluation.dominantHorizon)}.`
+    return `${formatHorizon(evaluation.dominantHorizon)} is most elevated; ${formatList(strongSignals.filter((horizon) => horizon !== evaluation.dominantHorizon).map(formatHorizon))} ${strongSignals.length === 2 ? 'is' : 'are'} elevated too.`
   }
 
-  return `${formatHorizon(evaluation.dominantHorizon)} is the clearest current anomaly.`
+  return `${formatHorizon(evaluation.dominantHorizon)} is elevated relative to expected volume.`
 }
 
 function buildSecondarySignals(evaluation) {
@@ -1347,8 +1672,78 @@ function buildSecondarySignals(evaluation) {
         horizon !== evaluation.dominantHorizon &&
         evaluation.horizonScores[horizon] >= 3.25,
     )
-    .map((horizon) => `${formatHorizon(horizon)} also elevated`)
+    .map((horizon) => `${formatHorizon(horizon)} total also elevated`)
     .slice(0, 3)
+}
+
+function formatComparisonText(evaluation) {
+  const actualText = formatCallCount(evaluation.actual)
+  const expectedText = evaluation.expected > 0
+    ? `${formatWholeNumber(evaluation.expected)} expected`
+    : 'near zero expected'
+  const deviationText = evaluation.expected > 0
+    ? ` (${formatSignedPercent(evaluation.deltaPct)})`
+    : ''
+
+  return `${actualText}, compared with ${expectedText}${deviationText}`
+}
+
+function formatCallCount(value) {
+  const count = formatWholeNumber(value)
+  return `${count} ${Math.abs(value) === 1 ? 'call' : 'calls'}`
+}
+
+function formatList(values) {
+  if (values.length <= 1) {
+    return values[0] ?? ''
+  }
+
+  if (values.length === 2) {
+    return `${values[0]} and ${values[1]}`
+  }
+
+  return `${values.slice(0, -1).join(', ')}, and ${values.at(-1)}`
+}
+
+function describeAlertPeriod(evaluation) {
+  const latestDate = evaluation.timeline.at(-1)?.date ?? formatDateKey(END_DATE)
+
+  if (evaluation.dominantHorizon === 'today') {
+    return formatDisplayDate(latestDate)
+  }
+
+  if (evaluation.dominantHorizon === '7d') {
+    return `The last 7 days ending ${formatDisplayDate(latestDate)}`
+  }
+
+  if (evaluation.dominantHorizon === '30d') {
+    return `The last 30 days ending ${formatDisplayDate(latestDate)}`
+  }
+
+  if (evaluation.dominantHorizon === 'quarter') {
+    return `Quarter to date through ${formatDisplayDate(latestDate)}`
+  }
+
+  return `Year to date through ${formatDisplayDate(latestDate)}`
+}
+
+function formatDisplayDate(dateKey) {
+  return new Intl.DateTimeFormat('en-US', {
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  }).format(parseDateKey(dateKey))
+}
+
+function formatSignedPercent(value) {
+  const prefix = value > 0 ? '+' : ''
+  return `${prefix}${round1(value)}%`
+}
+
+function formatWholeNumber(value) {
+  return new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 0,
+  }).format(value)
 }
 
 function buildTags(evaluation) {
@@ -1439,7 +1834,7 @@ async function writeAlertFiles(alerts) {
 async function writeEntityFiles(entities) {
   await Promise.all(
     entities.map((entity) =>
-      writeJson(path.join(ENTITY_OUTPUT_ROOT, `${slugify(entity.id)}.json`), entity),
+      writeJson(path.join(ENTITY_OUTPUT_ROOT, `${entityFileSlug(entity.id)}.json`), entity),
     ),
   )
 }
@@ -1571,13 +1966,13 @@ function getPeriodBoundsFromStart(periodType, periodStart) {
   }
 }
 
-function listPriorPeriodStarts(periodType, currentPeriodStart) {
+function listPriorComparablePeriodStarts(periodType, currentPeriodStart) {
   const starts = []
   let cursor = parseDateKey(currentPeriodStart)
 
   for (;;) {
     if (periodType === 'quarter') {
-      cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() - 3, 1))
+      cursor = new Date(Date.UTC(cursor.getUTCFullYear() - 1, cursor.getUTCMonth(), 1))
     } else {
       cursor = new Date(Date.UTC(cursor.getUTCFullYear() - 1, 0, 1))
     }
@@ -1659,6 +2054,44 @@ function sumRecentExcess(timeline, window) {
   return timeline.slice(-window).reduce((sum, point) => sum + (point.actual - point.expected), 0)
 }
 
+function directionalContribution(metrics, direction) {
+  return direction === 'up'
+    ? Math.max(0, metrics.actual - metrics.expected)
+    : Math.max(0, metrics.expected - metrics.actual)
+}
+
+function getHorizonMetrics(timeline, horizon) {
+  if (horizon === 'today') {
+    const latest = timeline.at(-1) ?? { actual: 0, expected: 0 }
+    return {
+      actual: latest.actual,
+      expected: latest.expected,
+    }
+  }
+
+  if (horizon === '7d' || horizon === '30d') {
+    const window = horizon === '7d' ? 7 : 30
+
+    return {
+      actual: sumRecentActual(timeline, window),
+      expected: sumRecentExpected(timeline, window),
+    }
+  }
+
+  const bounds = getCurrentPeriodBounds(horizon)
+  let actual = 0
+  let expected = 0
+
+  for (const point of timeline) {
+    if (point.date >= bounds.start && point.date <= bounds.end) {
+      actual += point.actual
+      expected += point.expected
+    }
+  }
+
+  return { actual, expected }
+}
+
 function sumRecentActual(timeline, window) {
   return timeline.slice(-window).reduce((sum, point) => sum + point.actual, 0)
 }
@@ -1683,6 +2116,21 @@ function sumRange(values, startIndex, endIndex) {
 
 function sumArray(values) {
   return values.reduce((sum, value) => sum + value, 0)
+}
+
+function entityFileSlug(value) {
+  return `${slugify(value)}-${hashString(value)}`
+}
+
+function hashString(value) {
+  let hash = 2_166_136_261
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16_777_619)
+  }
+
+  return (hash >>> 0).toString(36)
 }
 
 function median(values) {
@@ -1759,6 +2207,12 @@ function startOfDay(date) {
 function addDays(date, days) {
   const next = new Date(date)
   next.setUTCDate(next.getUTCDate() + days)
+  return next
+}
+
+function addYears(date, years) {
+  const next = new Date(date)
+  next.setUTCFullYear(next.getUTCFullYear() + years)
   return next
 }
 

@@ -1,7 +1,8 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { LayoutGroup, motion } from 'framer-motion'
 import {
   BrowserRouter,
+  HashRouter,
   Navigate,
   Route,
   Routes,
@@ -29,6 +30,7 @@ import type {
   DashboardData,
   EntityRecord,
   EntitySummary,
+  GeographyType,
   PaneKey,
 } from './types'
 
@@ -36,8 +38,14 @@ const PANE_META: Array<{ key: PaneKey; label: string }> = [
   { key: 'main', label: 'Queue' },
   { key: '7d', label: '7D' },
   { key: '30d', label: '30D' },
-  { key: 'quarter', label: 'Quarter' },
+  { key: 'quarter', label: 'QTR' },
   { key: 'year', label: 'Year' },
+]
+
+const GEOGRAPHY_FILTERS: Array<{ key: GeographyType; label: string }> = [
+  { key: 'citywide', label: 'Citywide' },
+  { key: 'borough', label: 'Borough' },
+  { key: 'community-board', label: 'Community Board' },
 ]
 
 function SearchIcon() {
@@ -65,7 +73,6 @@ function QueueRow({
       type="button"
       onClick={() => onSelect(alert.id)}
     >
-      <div className="queue-row__priority">{alert.priority}</div>
       <div className="queue-row__content">
         <div className="queue-row__title-line">
           <div>
@@ -169,15 +176,29 @@ function DashboardWorkspace({
   const [activePane, setActivePane] = useState<PaneKey>('main')
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
+  const [selectedGeographies, setSelectedGeographies] = useState<Set<GeographyType>>(
+    () => new Set(['citywide', 'borough']),
+  )
   const [alertDetails, setAlertDetails] = useState<Record<string, AlertRecord>>({})
   const [entityDetails, setEntityDetails] = useState<Record<string, EntityRecord>>({})
   const [detailError, setDetailError] = useState<string>()
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
 
-  const activeRows =
-    activePane === 'main'
-      ? dashboardData.allAlerts
-      : dashboardData.fixedHorizon[activePane]
+  const filterAlerts = useCallback(
+    (alerts: AlertSummary[]) =>
+      alerts.filter((alert) => selectedGeographies.has(alert.geography.type)),
+    [selectedGeographies],
+  )
+
+  const activeRows = useMemo(
+    () =>
+      filterAlerts(
+        activePane === 'main'
+          ? dashboardData.mainQueue
+          : dashboardData.fixedHorizon[activePane],
+      ),
+    [activePane, dashboardData.fixedHorizon, dashboardData.mainQueue, filterAlerts],
+  )
 
   const selectedAlertSummary = params.alertId
     ? dashboardData.allAlerts.find((alert) => alert.id === params.alertId)
@@ -286,10 +307,11 @@ function DashboardWorkspace({
   function changePane(nextPane: PaneKey) {
     startTransition(() => setActivePane(nextPane))
 
-    const nextRows =
+    const nextRows = filterAlerts(
       nextPane === 'main'
-        ? dashboardData.allAlerts
-        : dashboardData.fixedHorizon[nextPane]
+        ? dashboardData.mainQueue
+        : dashboardData.fixedHorizon[nextPane],
+    )
 
     if (!selectedAlertSummary || !nextRows.some((row) => row.id === selectedAlertSummary.id)) {
       const nextAlert = nextRows[0]
@@ -298,6 +320,24 @@ function DashboardWorkspace({
         navigate(`/alerts/${nextAlert.id}`)
       }
     }
+  }
+
+  function toggleGeography(geography: GeographyType) {
+    setSelectedGeographies((current) => {
+      const next = new Set(current)
+
+      if (next.has(geography)) {
+        if (next.size === 1) {
+          return current
+        }
+
+        next.delete(geography)
+      } else {
+        next.add(geography)
+      }
+
+      return next
+    })
   }
 
   function returnToQueue() {
@@ -401,6 +441,23 @@ function DashboardWorkspace({
               </div>
             ) : null}
 
+            {!showExplorer ? (
+              <div className="geo-filter" aria-label="Geography filters">
+                {GEOGRAPHY_FILTERS.map((geography) => (
+                  <button
+                    key={geography.key}
+                    aria-pressed={selectedGeographies.has(geography.key)}
+                    className={`geo-filter__button ${selectedGeographies.has(geography.key) ? 'is-active' : ''}`}
+                    title={geography.key === 'community-board' ? 'Community Board' : geography.label}
+                    type="button"
+                    onClick={() => toggleGeography(geography.key)}
+                  >
+                    {geography.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             <div className="worklist-pane__inline-title">
               <p className="section-kicker">
                 {showExplorer ? 'Category results' : 'Current queue'}
@@ -411,7 +468,7 @@ function DashboardWorkspace({
                 </span>
               ) : activePane === 'main' ? (
                 <span className="worklist-pane__summary">
-                  {dashboardData.allAlerts.length} active alerts
+                  {activeRows.length} active alerts
                 </span>
               ) : null}
             </div>
@@ -531,8 +588,10 @@ export default function App() {
     )
   }
 
+  const Router = import.meta.env.VITE_HASH_ROUTER === 'true' ? HashRouter : BrowserRouter
+
   return (
-    <BrowserRouter>
+    <Router>
       <Routes>
         <Route path="/" element={<IndexRedirect dashboardData={dashboardData} />} />
         <Route
@@ -544,6 +603,6 @@ export default function App() {
           element={<DashboardWorkspace dashboardData={dashboardData} />}
         />
       </Routes>
-    </BrowserRouter>
+    </Router>
   )
 }
