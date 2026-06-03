@@ -30,7 +30,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -45,6 +45,8 @@ jobs:
         run: npm ci
 
       - name: Refresh dashboard data
+        env:
+          NYC_OPEN_DATA_APP_TOKEN: ${{ secrets.NYC_OPEN_DATA_APP_TOKEN }}
         run: npm run refresh:data
 
       - name: Build static site

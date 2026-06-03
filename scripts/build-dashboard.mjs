@@ -3,12 +3,13 @@ import path from 'node:path'
 
 const DATASET_ID = 'erm2-nwe9'
 const SOCRATA_BASE_URL = `https://data.cityofnewyork.us/resource/${DATASET_ID}.json`
+const SOCRATA_APP_TOKEN = process.env.NYC_OPENDATA_APP_TOKEN ?? process.env.NYC_OPEN_DATA_APP_TOKEN
 const OUTPUT_ROOT = path.resolve('public/data')
 const ALERT_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'alerts')
 const ENTITY_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'entities')
 const INDEX_OUTPUT_PATH = path.join(OUTPUT_ROOT, 'dashboard-index.json')
 const WINDOW_DAYS = process.env.DASHBOARD_WINDOW_DAYS ? Number(process.env.DASHBOARD_WINDOW_DAYS) : undefined
-const WINDOW_YEARS = Number(process.env.DASHBOARD_WINDOW_YEARS ?? 5)
+const WINDOW_YEARS = Number(process.env.DASHBOARD_WINDOW_YEARS ?? 3)
 const COMPLETENESS_LOOKBACK_DAYS = Number(process.env.DASHBOARD_COMPLETENESS_LOOKBACK_DAYS ?? 56)
 const COMPLETENESS_MIN_RATIO = Number(process.env.DASHBOARD_COMPLETENESS_MIN_RATIO ?? 0.65)
 const COMPLETENESS_MIN_PRIOR_WEEKS = Number(process.env.DASHBOARD_COMPLETENESS_MIN_PRIOR_WEEKS ?? 3)
@@ -372,10 +373,13 @@ async function fetchJsonWithRetry(url, label, attempt = 0) {
 async function fetchWithRetry(url, label, attempt = 0) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 60_000)
+  const headers = SOCRATA_APP_TOKEN
+    ? { 'X-App-Token': SOCRATA_APP_TOKEN }
+    : undefined
   let response
 
   try {
-    response = await fetch(url, { signal: controller.signal })
+    response = await fetch(url, { headers, signal: controller.signal })
   } catch (error) {
     clearTimeout(timeout)
 
