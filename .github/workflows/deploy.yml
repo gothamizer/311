@@ -45,6 +45,7 @@ jobs:
         run: npm ci
 
       - name: Refresh dashboard data
+        if: github.event_name != 'push'
         env:
           NYC_OPEN_DATA_APP_TOKEN: ${{ secrets.NYC_OPEN_DATA_APP_TOKEN }}
         run: npm run refresh:data
