@@ -3,7 +3,8 @@ name: Refresh and deploy dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 10 * * *'
+    # GitHub cron is UTC; 11:00 UTC is 7am Eastern during daylight saving time.
+    - cron: '0 11 * * *'
   push:
     branches:
       - main
@@ -30,7 +31,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 180
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -44,8 +45,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Restore dashboard aggregate cache
+        uses: actions/cache@v4
+        with:
+          path: .dashboard-cache
+          key: dashboard-aggregates-${{ github.run_id }}
+          restore-keys: |
+            dashboard-aggregates-
+
       - name: Refresh dashboard data
+        env:
+          NYC_OPEN_DATA_APP_TOKEN: ${{ secrets.NYC_OPEN_DATA_APP_TOKEN }}
         run: npm run refresh:data
+
+      - name: Validate dashboard data
+        run: npm run validate:data
 
       - name: Build static site
         run: GITHUB_PAGES=true VITE_HASH_ROUTER=true npm run build

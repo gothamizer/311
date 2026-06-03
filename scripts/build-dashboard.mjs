@@ -1,12 +1,16 @@
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const DATASET_ID = 'erm2-nwe9'
 const SOCRATA_BASE_URL = `https://data.cityofnewyork.us/resource/${DATASET_ID}.json`
+const SOCRATA_APP_TOKEN = readRequiredEnv('NYC_OPEN_DATA_APP_TOKEN')
+const SOCRATA_REQUEST_TIMEOUT_MS = Number(process.env.SOCRATA_REQUEST_TIMEOUT_MS ?? 300_000)
 const OUTPUT_ROOT = path.resolve('public/data')
 const ALERT_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'alerts')
 const ENTITY_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'entities')
 const INDEX_OUTPUT_PATH = path.join(OUTPUT_ROOT, 'dashboard-index.json')
+const AGGREGATE_CACHE_ROOT = path.resolve(process.env.DASHBOARD_AGGREGATE_CACHE_DIR ?? '.dashboard-cache/aggregates')
 const WINDOW_DAYS = process.env.DASHBOARD_WINDOW_DAYS ? Number(process.env.DASHBOARD_WINDOW_DAYS) : undefined
 const WINDOW_YEARS = Number(process.env.DASHBOARD_WINDOW_YEARS ?? 5)
 const COMPLETENESS_LOOKBACK_DAYS = Number(process.env.DASHBOARD_COMPLETENESS_LOOKBACK_DAYS ?? 56)
@@ -15,8 +19,17 @@ const COMPLETENESS_MIN_PRIOR_WEEKS = Number(process.env.DASHBOARD_COMPLETENESS_M
 const COMPLETENESS_MIN_COUNT = Number(process.env.DASHBOARD_COMPLETENESS_MIN_COUNT ?? 1000)
 const FALLBACK_DATA_LAG_DAYS = Number(process.env.DASHBOARD_FALLBACK_DATA_LAG_DAYS ?? 3)
 const TOP_DETAIL_PROBLEM_COUNT = 15
+const TOP_DETAIL_CACHE_PATH = path.resolve(process.env.DASHBOARD_TOP_DETAIL_CACHE_PATH ?? '.dashboard-cache/top-detail-problems.json')
+const TOP_DETAIL_REFRESH_DAYS = Number(process.env.DASHBOARD_TOP_DETAIL_REFRESH_DAYS ?? 30)
+const TOP_DETAIL_EXCEPTION_LOOKBACK_DAYS = Number(process.env.DASHBOARD_TOP_DETAIL_EXCEPTION_LOOKBACK_DAYS ?? 7)
+const TOP_DETAIL_EXCEPTION_CANDIDATE_LIMIT = Number(process.env.DASHBOARD_TOP_DETAIL_EXCEPTION_CANDIDATE_LIMIT ?? 25)
+const TOP_DETAIL_EXCEPTION_MIN_CALLS = Number(process.env.DASHBOARD_TOP_DETAIL_EXCEPTION_MIN_CALLS ?? 5_000)
+const TOP_DETAIL_EXCEPTION_RATIO = Number(process.env.DASHBOARD_TOP_DETAIL_EXCEPTION_RATIO ?? 4)
+const TOP_DETAIL_EXCEPTION_MAX_ADDITIONS = Number(process.env.DASHBOARD_TOP_DETAIL_EXCEPTION_MAX_ADDITIONS ?? 1)
+const AGGREGATE_PAGE_SIZE = Number(process.env.DASHBOARD_PAGE_SIZE ?? 500_000)
 const PAGE_LIMIT = process.env.DASHBOARD_PAGE_LIMIT ? Number(process.env.DASHBOARD_PAGE_LIMIT) : undefined
 const PARTITION_MONTHS = Number(process.env.DASHBOARD_PARTITION_MONTHS ?? 3)
+const CACHE_REFRESH_LOOKBACK_DAYS = Number(process.env.DASHBOARD_CACHE_REFRESH_LOOKBACK_DAYS ?? COMPLETENESS_LOOKBACK_DAYS)
 const ACTIVE_PRIORITY_FLOOR = 58
 const LONG_HORIZON_ACTIVE_SCORE = 12
 const HORIZON_MINIMUMS = {
@@ -68,57 +81,48 @@ async function main() {
   )
   console.log(`Building dashboard for ${formatDateKey(START_DATE)} to ${formatDateKey(END_DATE)}`)
 
-  const topDetailProblems = await fetchTopDetailProblems()
+  const citywideProblemRows = await fetchPartitionedAggregates({
+    label: 'problem-citywide',
+    extraWhere: '',
+    group: ['day', 'complaint_type'],
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+  const topDetailProblems = await selectTopDetailProblems(citywideProblemRows)
   console.log(`Tracking detail series for ${topDetailProblems.length} high-volume problems`)
-
-  const [
-    citywideProblemRows,
-    boroughProblemRows,
-    boardProblemRows,
-    citywideDetailRows,
-    boroughDetailRows,
-  ] = await Promise.all([
-    fetchPartitionedAggregates({
-      label: 'problem-citywide',
-      extraWhere: '',
-      group: ['day', 'complaint_type'],
-      partitionMonths: PARTITION_MONTHS,
-      select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'count(*) as n'],
-      startDate: START_DATE,
-    }),
-    fetchPartitionedAggregates({
-      label: 'problem-borough',
-      extraWhere: `borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))})`,
-      group: ['day', 'complaint_type', 'borough'],
-      partitionMonths: PARTITION_MONTHS,
-      select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'borough', 'count(*) as n'],
-      startDate: START_DATE,
-    }),
-    fetchPartitionedAggregates({
-      label: 'problem-board',
-      extraWhere: 'community_board is not null',
-      group: ['day', 'complaint_type', 'community_board'],
-      partitionMonths: PARTITION_MONTHS,
-      select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'community_board', 'count(*) as n'],
-      startDate: START_DATE,
-    }),
-    fetchPartitionedAggregates({
-      label: 'detail-citywide',
-      extraWhere: `descriptor is not null AND complaint_type in (${quoteList(topDetailProblems)})`,
-      group: ['day', 'complaint_type', 'descriptor'],
-      partitionMonths: PARTITION_MONTHS,
-      select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'count(*) as n'],
-      startDate: START_DATE,
-    }),
-    fetchPartitionedAggregates({
-      label: 'detail-borough',
-      extraWhere: `descriptor is not null AND borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))}) AND complaint_type in (${quoteList(topDetailProblems)})`,
-      group: ['day', 'complaint_type', 'descriptor', 'borough'],
-      partitionMonths: PARTITION_MONTHS,
-      select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'borough', 'count(*) as n'],
-      startDate: START_DATE,
-    }),
-  ])
+  const boroughProblemRows = await fetchPartitionedAggregates({
+    label: 'problem-borough',
+    extraWhere: `borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))})`,
+    group: ['day', 'complaint_type', 'borough'],
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'borough', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+  const boardProblemRows = await fetchPartitionedAggregates({
+    label: 'problem-board',
+    extraWhere: 'community_board is not null',
+    group: ['day', 'complaint_type', 'community_board'],
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'community_board', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+  const citywideDetailRows = await fetchPartitionedAggregates({
+    label: 'detail-citywide',
+    extraWhere: `descriptor is not null AND complaint_type in (${quoteList(topDetailProblems)})`,
+    group: ['day', 'complaint_type', 'descriptor'],
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+  const boroughDetailRows = await fetchPartitionedAggregates({
+    label: 'detail-borough',
+    extraWhere: `descriptor is not null AND borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))}) AND complaint_type in (${quoteList(topDetailProblems)})`,
+    group: ['day', 'complaint_type', 'descriptor', 'borough'],
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'borough', 'count(*) as n'],
+    startDate: START_DATE,
+  })
 
   const problemSeries = new Map()
   const detailSeries = new Map()
@@ -275,19 +279,157 @@ async function fetchCompletenessCounts() {
     .filter((row) => row.date && Number.isFinite(row.count))
 }
 
-async function fetchTopDetailProblems() {
-  const rows = await fetchAggregates({
-    group: ['complaint_type'],
-    label: 'top-detail-problems',
-    select: ['complaint_type', 'count(*) as n'],
-    where: `created_date >= '${formatDateKey(addDays(END_DATE, -364))}T00:00:00' AND created_date < '${formatDateKey(addDays(END_DATE, 1))}T00:00:00' AND complaint_type is not null`,
-    order: 'n DESC',
-    limit: TOP_DETAIL_PROBLEM_COUNT,
+async function selectTopDetailProblems(citywideProblemRows) {
+  const cached = await readTopDetailCache()
+
+  if (!cached || daysBetween(cached.baseRefreshedOn, formatDateKey(END_DATE)) >= TOP_DETAIL_REFRESH_DAYS) {
+    const rows = summarizeProblemRows(citywideProblemRows, {
+      days: 365,
+      limit: TOP_DETAIL_PROBLEM_COUNT,
+    })
+    const problems = rows.map((row) => row.problem)
+    await writeTopDetailCache({
+      baseRefreshedOn: formatDateKey(END_DATE),
+      problems,
+      updatedFor: formatDateKey(END_DATE),
+    })
+    return problems
+  }
+
+  const recentRows = summarizeProblemRows(citywideProblemRows, {
+    days: TOP_DETAIL_EXCEPTION_LOOKBACK_DAYS,
+    limit: TOP_DETAIL_EXCEPTION_CANDIDATE_LIMIT,
+  })
+  const cachedRecentCounts = summarizeProblemCounts(citywideProblemRows, {
+    days: TOP_DETAIL_EXCEPTION_LOOKBACK_DAYS,
+    problems: cached.problems,
+  })
+  const weakestTrackedCount = Math.min(...cached.problems.map((problem) => cachedRecentCounts.get(problem) ?? 0))
+  const exceptionFloor = Math.max(
+    TOP_DETAIL_EXCEPTION_MIN_CALLS,
+    Math.ceil(weakestTrackedCount * TOP_DETAIL_EXCEPTION_RATIO),
+  )
+  const exceptions = recentRows
+    .filter((row) => !cached.problems.includes(row.problem) && row.count >= exceptionFloor)
+    .map((row) => row.problem)
+    .slice(0, TOP_DETAIL_EXCEPTION_MAX_ADDITIONS)
+
+  if (!exceptions.length) {
+    console.log(`Using cached top-detail problem list from ${cached.baseRefreshedOn}`)
+    return cached.problems
+  }
+
+  const nextProblems = applyTopDetailExceptions(cached.problems, exceptions, cachedRecentCounts)
+  await writeTopDetailCache({
+    baseRefreshedOn: cached.baseRefreshedOn,
+    problems: nextProblems,
+    updatedFor: formatDateKey(END_DATE),
+  })
+  console.log(`Added top-detail exception problems: ${exceptions.join(', ')}`)
+  return nextProblems
+}
+
+function summarizeProblemRows(rows, { days, limit }) {
+  const counts = summarizeProblemCounts(rows, {
+    days,
+    problems: [...new Set(rows.map((row) => row.complaint_type).filter(Boolean))],
   })
 
-  return rows
-    .map((row) => row.complaint_type)
-    .filter(Boolean)
+  return [...counts.entries()]
+    .map(([problem, count]) => ({ count, problem }))
+    .sort((left, right) => right.count - left.count || left.problem.localeCompare(right.problem))
+    .slice(0, limit)
+}
+
+function summarizeProblemCounts(rows, { days, problems }) {
+  const problemSet = new Set(problems)
+  const startDateKey = formatDateKey(addDays(END_DATE, -(days - 1)))
+  const endDateKey = formatDateKey(END_DATE)
+  const counts = new Map(problems.map((problem) => [problem, 0]))
+
+  for (const row of rows) {
+    const problem = row.complaint_type
+    const date = row.day?.slice(0, 10)
+
+    if (!problemSet.has(problem) || !date || date < startDateKey || date > endDateKey) {
+      continue
+    }
+
+    const count = Number(row.n)
+
+    if (!Number.isFinite(count)) {
+      continue
+    }
+
+    counts.set(problem, (counts.get(problem) ?? 0) + count)
+  }
+
+  return counts
+}
+
+function applyTopDetailExceptions(cachedProblems, exceptions, cachedRecentCounts) {
+  const nextProblems = [...cachedProblems]
+
+  for (const exception of exceptions) {
+    if (nextProblems.includes(exception)) {
+      continue
+    }
+
+    const replaceable = nextProblems
+      .map((problem, index) => ({
+        count: cachedRecentCounts.get(problem) ?? 0,
+        index,
+      }))
+      .sort((left, right) => left.count - right.count || left.index - right.index)[0]
+
+    if (replaceable) {
+      nextProblems[replaceable.index] = exception
+    }
+  }
+
+  return nextProblems
+}
+
+async function readTopDetailCache() {
+  try {
+    const cache = JSON.parse(await readFile(TOP_DETAIL_CACHE_PATH, 'utf8'))
+    validateTopDetailCache(cache)
+    return cache
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return undefined
+    }
+
+    throw error
+  }
+}
+
+async function writeTopDetailCache(cache) {
+  validateTopDetailCache(cache)
+  await mkdir(path.dirname(TOP_DETAIL_CACHE_PATH), { recursive: true })
+  await writeFile(TOP_DETAIL_CACHE_PATH, JSON.stringify(cache))
+}
+
+function validateTopDetailCache(cache) {
+  if (!cache || typeof cache !== 'object') {
+    throw new Error('Top-detail cache must be an object')
+  }
+
+  if (!isDateKey(cache.baseRefreshedOn)) {
+    throw new Error('Top-detail cache is missing a valid baseRefreshedOn date')
+  }
+
+  if (!isDateKey(cache.updatedFor)) {
+    throw new Error('Top-detail cache is missing a valid updatedFor date')
+  }
+
+  if (
+    !Array.isArray(cache.problems) ||
+    cache.problems.length !== TOP_DETAIL_PROBLEM_COUNT ||
+    cache.problems.some((problem) => typeof problem !== 'string' || !problem.trim())
+  ) {
+    throw new Error(`Top-detail cache must contain exactly ${TOP_DETAIL_PROBLEM_COUNT} problem names`)
+  }
 }
 
 async function fetchPartitionedAggregates({
@@ -302,11 +444,15 @@ async function fetchPartitionedAggregates({
 
   for (const partition of buildPartitions(startDate, END_DATE, partitionMonths)) {
     const partitionLabel = `${label}:${formatDateKey(partition.startDate)}`
-    const partitionRows = await fetchAggregates({
+    const query = {
       group,
       label: partitionLabel,
       select,
       where: buildBaseWhere(partition.startDate, partition.endExclusive, extraWhere),
+    }
+    const partitionRows = await fetchCachedAggregates(query, {
+      read: isCacheStablePartition(partition),
+      write: true,
     })
 
     for (const row of partitionRows) {
@@ -317,8 +463,33 @@ async function fetchPartitionedAggregates({
   return rows
 }
 
+async function fetchCachedAggregates(query, cacheOptions) {
+  const cachePath = aggregateCachePath(query)
+
+  if (cacheOptions.read) {
+    try {
+      const cachedRows = JSON.parse(await readFile(cachePath, 'utf8'))
+      console.log(`[${query.label}] cache hit ${cachedRows.length} rows`)
+      return cachedRows
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw error
+      }
+    }
+  }
+
+  const rows = await fetchAggregates(query)
+
+  if (cacheOptions.write) {
+    await mkdir(path.dirname(cachePath), { recursive: true })
+    await writeFile(cachePath, JSON.stringify(rows))
+  }
+
+  return rows
+}
+
 async function fetchAggregates({ group, label, limit, order, select, where }) {
-  const pageSize = limit ?? 50_000
+  const pageSize = limit ?? AGGREGATE_PAGE_SIZE
   const rows = []
   let offset = 0
   let pageCount = 0
@@ -335,7 +506,9 @@ async function fetchAggregates({ group, label, limit, order, select, where }) {
     console.log(`[${label}] page ${pageCount + 1} offset ${offset}`)
     const page = await fetchJsonWithRetry(`${SOCRATA_BASE_URL}?${params.toString()}`, label)
 
-    rows.push(...page)
+    for (const row of page) {
+      rows.push(row)
+    }
     pageCount += 1
 
     if (page.length < pageSize || (limit && rows.length >= limit) || (PAGE_LIMIT && pageCount >= PAGE_LIMIT)) {
@@ -370,11 +543,16 @@ async function fetchJsonWithRetry(url, label, attempt = 0) {
 
 async function fetchWithRetry(url, label, attempt = 0) {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 60_000)
+  const timeout = setTimeout(() => controller.abort(), SOCRATA_REQUEST_TIMEOUT_MS)
   let response
 
   try {
-    response = await fetch(url, { signal: controller.signal })
+    response = await fetch(url, {
+      headers: {
+        'X-App-Token': SOCRATA_APP_TOKEN,
+      },
+      signal: controller.signal,
+    })
   } catch (error) {
     clearTimeout(timeout)
 
@@ -1358,9 +1536,7 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
       sparkline: top.sparkline,
       summary: `${detail} is on ${currentStatus} within ${problem}, led by ${top.geography.shortLabel}.`,
       timeline: top.timeline,
-      topAlertId: [...alertMap.values()].find(
-        (alert) => alert.problem === problem && alert.detail === detail,
-      )?.id,
+      topAlertId: findProblemAlertIdForDetail(alertMap, problem, detail, top.geography.id),
       type: 'detail',
     })
   }
@@ -1375,6 +1551,19 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
 
     return left.name.localeCompare(right.name)
   })
+}
+
+function findProblemAlertIdForDetail(alertMap, problem, detail, geographyId) {
+  const alerts = [...alertMap.values()].filter((alert) => alert.problem === problem)
+  const sameGeographyDetailAlert = alerts.find(
+    (alert) =>
+      alert.geography.id === geographyId &&
+      alert.details.some((row) => row.name === detail),
+  )
+  const anyDetailAlert = alerts.find((alert) => alert.details.some((row) => row.name === detail))
+  const sameGeographyAlert = alerts.find((alert) => alert.geography.id === geographyId)
+
+  return (sameGeographyDetailAlert ?? anyDetailAlert ?? sameGeographyAlert ?? alerts[0])?.id
 }
 
 function getEntityEvaluationStatus(evaluation) {
@@ -1918,17 +2107,40 @@ function buildPartitions(startDate, endDate, partitionMonths) {
   const partitions = []
   let cursor = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1))
   const finalExclusive = addDays(endDate, 1)
+  const cacheRefreshStart = getCacheRefreshStart()
 
   while (cursor < finalExclusive) {
     const next = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + partitionMonths, 1))
-    partitions.push({
+    const partition = {
       endExclusive: next < finalExclusive ? next : finalExclusive,
       startDate: cursor < startDate ? startDate : cursor,
-    })
+    }
+
+    if (partition.startDate < cacheRefreshStart && partition.endExclusive > cacheRefreshStart) {
+      partitions.push({
+        endExclusive: cacheRefreshStart,
+        startDate: partition.startDate,
+      })
+      partitions.push({
+        endExclusive: partition.endExclusive,
+        startDate: cacheRefreshStart,
+      })
+    } else {
+      partitions.push(partition)
+    }
+
     cursor = next
   }
 
   return partitions
+}
+
+function isCacheStablePartition(partition) {
+  return partition.endExclusive <= getCacheRefreshStart()
+}
+
+function getCacheRefreshStart() {
+  return startOfDay(addDays(END_DATE, -(CACHE_REFRESH_LOOKBACK_DAYS - 1)))
 }
 
 function buildBoardDefinitions() {
@@ -2182,6 +2394,31 @@ function hashString(value) {
   return (hash >>> 0).toString(36)
 }
 
+function aggregateCachePath(query) {
+  const key = JSON.stringify({
+    dataset: DATASET_ID,
+    group: query.group,
+    limit: query.limit,
+    order: query.order,
+    pageSize: query.limit ?? AGGREGATE_PAGE_SIZE,
+    select: query.select,
+    version: 1,
+    where: query.where,
+  })
+  const hash = createHash('sha256').update(key).digest('hex')
+  return path.join(AGGREGATE_CACHE_ROOT, `${hash}.json`)
+}
+
+function readRequiredEnv(name) {
+  const value = process.env[name]
+
+  if (!value) {
+    throw new Error(`${name} is required for authenticated NYC Open Data requests`)
+  }
+
+  return value
+}
+
 function median(values) {
   if (!values.length) {
     return 0
@@ -2271,6 +2508,14 @@ function formatDateKey(date) {
 
 function parseDateKey(value) {
   return new Date(`${value}T00:00:00.000Z`)
+}
+
+function isDateKey(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+}
+
+function daysBetween(startDateKey, endDateKey) {
+  return Math.floor((parseDateKey(endDateKey) - parseDateKey(startDateKey)) / 86_400_000)
 }
 
 function formatHorizon(horizon) {
