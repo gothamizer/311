@@ -51,6 +51,10 @@ export interface DistrictDatum {
   id: string
   label: string
   actual: number
+  // Fraction of all 311 activity this board normally carries (across every problem),
+  // used as the denominator for the map's concentration mode. May be absent on
+  // older payloads, in which case concentration falls back gracefully.
+  activityShare?: number
   code: string
   expected: number
   // False when no volume was observed for this problem in the board; such cells

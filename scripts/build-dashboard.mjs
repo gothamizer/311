@@ -133,6 +133,12 @@ async function main() {
   ingestDetailRows(detailSeries, citywideDetailRows, 'citywide')
   ingestDetailRows(detailSeries, boroughDetailRows, 'borough')
 
+  // Each board's share of all 311 activity (every complaint type, full window). A
+  // stable "how busy is this district in general" denominator so the map's
+  // concentration mode can flag where a problem is over-represented rather than just
+  // where the city is dense.
+  const boardActivityShares = computeBoardActivityShares(boardProblemRows)
+
   const problemEvaluations = evaluateSeriesCollection(problemSeries, {
     includeDetails: true,
     topDetailProblems: new Set(topDetailProblems),
@@ -159,14 +165,14 @@ async function main() {
   const problemAlerts = selectProblemAlerts(problemEvaluations, detailIndex)
   const allAlerts = mergeGeographyDuplicates(problemAlerts).sort((left, right) => right.priority - left.priority)
   const alertRecords = allAlerts.map((evaluation) =>
-    buildAlertRecord(evaluation, detailIndex, problemEvaluations),
+    buildAlertRecord(evaluation, detailIndex, problemEvaluations, boardActivityShares),
   )
 
   const alertMap = new Map(alertRecords.map((alert) => [alert.id, alert]))
   const fixedHorizon = buildFixedHorizon(alertRecords)
   const mainQueue = alertRecords
 
-  const entityIndex = buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, alertMap)
+  const entityIndex = buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, alertMap, boardActivityShares)
 
   await prepareOutputDirectories()
   await writeAlertFiles(alertRecords)
@@ -1398,8 +1404,8 @@ function mergeGeographyDuplicates(alerts) {
   })
 }
 
-function buildAlertRecord(evaluation, detailIndex, problemEvaluations) {
-  const map = buildDistrictMap(evaluation.problem, evaluation.dominantHorizon, problemEvaluations, evaluation.geography.id)
+function buildAlertRecord(evaluation, detailIndex, problemEvaluations, boardActivityShares) {
+  const map = buildDistrictMap(evaluation.problem, evaluation.dominantHorizon, problemEvaluations, boardActivityShares, evaluation.geography.id)
   const details = buildDetails(evaluation, detailIndex)
   const idBase = `${slugify(evaluation.problem)}-${evaluation.detail ? `${slugify(evaluation.detail)}-` : ''}${evaluation.geography.id}-${evaluation.dominantHorizon}`
   const id = `${idBase}-${hashString(`${evaluation.seriesKey}|${evaluation.dominantHorizon}`)}`
@@ -1441,7 +1447,7 @@ function buildFixedHorizon(alertRecords) {
   }
 }
 
-function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, alertMap) {
+function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, alertMap, boardActivityShares) {
   const entities = []
   const problemNames = [...new Set(problemEvaluations.map((evaluation) => evaluation.problem))].sort()
 
@@ -1478,7 +1484,7 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
       historyTimeline: top.historyTimeline,
       horizonScores: maxHorizonScores(related),
       id,
-      map: buildDistrictMap(problem, top.dominantHorizon, problemEvaluations),
+      map: buildDistrictMap(problem, top.dominantHorizon, problemEvaluations, boardActivityShares),
       name: problem,
       sparkline: top.sparkline,
       summary: `${top.geography.shortLabel} is the clearest live view for ${problem} right now, with the strongest pull on ${formatHorizon(top.dominantHorizon)}.`,
@@ -1530,7 +1536,7 @@ function buildEntityIndex(problemEvaluations, detailEvaluations, detailIndex, al
       historyTimeline: top.historyTimeline,
       horizonScores: maxHorizonScores(related),
       id,
-      map: buildDistrictMap(problem, top.dominantHorizon, problemEvaluations),
+      map: buildDistrictMap(problem, top.dominantHorizon, problemEvaluations, boardActivityShares),
       name: detail,
       parentProblem: problem,
       sparkline: top.sparkline,
@@ -1578,29 +1584,22 @@ function getEntityEvaluationStatus(evaluation) {
   return 'quiet'
 }
 
-function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeographyId) {
+function buildDistrictMap(problem, horizon, problemEvaluations, boardActivityShares, selectedGeographyId) {
   const boardEvaluations = problemEvaluations.filter(
     (evaluation) => evaluation.problem === problem && evaluation.geography.type === 'community-board',
   )
   const byGeographyId = new Map(boardEvaluations.map((evaluation) => [evaluation.geography.id, evaluation]))
-  const windowSize = horizon === 'today'
-    ? 1
-    : horizon === '7d'
-      ? 7
-      : horizon === '30d'
-        ? 30
-        : horizon === 'quarter'
-          ? getCurrentPeriodBounds('quarter').totalDays
-          : getCurrentPeriodBounds('year').totalDays
 
   return BOARD_DEFINITIONS.map((board) => {
     const evaluation = byGeographyId.get(board.id)
-    const actual = evaluation
-      ? roundCount(sumRecentActual(evaluation.timeline, windowSize))
-      : 0
-    const expected = evaluation
-      ? roundCount(sumRecentExpected(evaluation.timeline, windowSize))
-      : 0
+    // Use the same window the alert headline uses (period-to-date for quarter/year,
+    // not a trailing full-period window) so a board's map number agrees with the
+    // alert it belongs to instead of contradicting it.
+    const metrics = evaluation
+      ? getHorizonMetrics(evaluation.timeline, horizon)
+      : { actual: 0, expected: 0 }
+    const actual = roundCount(metrics.actual)
+    const expected = roundCount(metrics.expected)
     // A board only carries a usable signal when we actually observed volume for
     // this problem there. Boards with no data are left neutral on the map instead
     // of being painted as if they were exactly on baseline.
@@ -1612,6 +1611,9 @@ function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeograph
       id: board.id,
       label: board.label,
       actual,
+      // Share of all 311 activity this board normally carries — the denominator the
+      // map's concentration mode divides by.
+      activityShare: round4(boardActivityShares.get(board.id) ?? 0),
       code: board.code,
       expected,
       hasData,
@@ -1619,6 +1621,36 @@ function buildDistrictMap(problem, horizon, problemEvaluations, selectedGeograph
       isFocus: selectedGeographyId === board.id,
     }
   })
+}
+
+// Each board's fraction of all 311 calls observed in the fetched window, across
+// every complaint type. Stable "general busyness" weight per district.
+function computeBoardActivityShares(boardProblemRows) {
+  const totals = new Map()
+  let grandTotal = 0
+
+  for (const row of boardProblemRows) {
+    const boardId = parseCommunityBoard(row.community_board)?.id
+
+    if (!boardId) {
+      continue
+    }
+
+    const count = Number(row.n)
+
+    if (!Number.isFinite(count)) {
+      continue
+    }
+
+    totals.set(boardId, (totals.get(boardId) ?? 0) + count)
+    grandTotal += count
+  }
+
+  if (grandTotal <= 0) {
+    return new Map()
+  }
+
+  return new Map([...totals].map(([boardId, total]) => [boardId, total / grandTotal]))
 }
 
 // Build the descriptor-level breakdown that the UI renders as badges. Each detail
@@ -2482,6 +2514,10 @@ function round1(value) {
 
 function round2(value) {
   return Number(value.toFixed(2))
+}
+
+function round4(value) {
+  return Number(value.toFixed(4))
 }
 
 function roundCount(value) {
