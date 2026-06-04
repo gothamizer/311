@@ -73,9 +73,22 @@ function horizonWindowDays(horizon: AlertRecord['horizon']) {
   }
 }
 
-function MetricCard({ label, value }: { label: string; value: string }) {
+function MetricCard({
+  accent,
+  label,
+  title,
+  value,
+}: {
+  accent?: boolean
+  label: string
+  title?: string
+  value: string
+}) {
   return (
-    <div className="detail-panel__metric-card">
+    <div
+      className={`detail-panel__metric-card ${accent ? 'detail-panel__metric-card--accent' : ''}`}
+      title={title}
+    >
       <p className="metric-label">{label}</p>
       <p className="metric-figure">{value}</p>
     </div>
@@ -302,18 +315,17 @@ export function DetailPanel({
           >
             {selection.kind === 'alert' && headlineMetrics ? (
               <>
-                <MetricCard label="Alert" value={formatHorizonLabel(selection.alert.horizon)} />
+                <MetricCard label="Window" value={formatHorizonLabel(selection.alert.horizon)} />
                 <MetricCard label="Actual" value={formatCount(headlineMetrics.actual)} />
                 <MetricCard label="Expected" value={formatCount(headlineMetrics.expected)} />
                 <MetricCard label="Deviation" value={formatDelta(headlineMetrics.deltaPct)} />
-                <div
-                  className="detail-panel__metric-card detail-panel__metric-card--sigma"
+                <MetricCard
+                  accent
+                  label="Std. dev"
                   title={`Standard deviations from the baseline (${headlineMetrics.baselineLabel})`}
-                >
-                  <p className="metric-label">Std. dev.</p>
-                  <p className="metric-figure">{formatSigma(headlineMetrics.sigma)}</p>
-                  <p className="detail-panel__metric-note">{headlineMetrics.baselineLabel}</p>
-                </div>
+                  value={formatSigma(headlineMetrics.sigma)}
+                />
+                <p className="detail-panel__metric-caption">{headlineMetrics.baselineLabel}</p>
               </>
             ) : selection.kind === 'entity' ? (
               <>
@@ -410,17 +422,6 @@ export function DetailPanel({
                 </label>
               </div>
             ) : null}
-
-            <div className="detail-panel__inline-legend" aria-hidden="true">
-              <span className="detail-panel__inline-legend-item">
-                <span className="detail-panel__inline-swatch detail-panel__inline-swatch--actual" />
-                Actual
-              </span>
-              <span className="detail-panel__inline-legend-item">
-                <span className="detail-panel__inline-swatch detail-panel__inline-swatch--expected" />
-                Expected
-              </span>
-            </div>
           </div>
         </div>
 
@@ -444,6 +445,7 @@ export function DetailPanel({
             selection.kind === 'alert' ? selection.alert.geography.borough : undefined
           }
           selectedGeographyId={selection.kind === 'alert' ? selection.alert.geography.id : undefined}
+          subjectLabel={selection.kind === 'alert' ? selection.alert.problem : entity?.name}
         />
 
         {selection.kind === 'entity' ? (

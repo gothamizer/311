@@ -46,8 +46,6 @@ interface PreparedChart {
   }
 }
 
-type CompareKey = 'compare1' | 'compare2' | 'compare3'
-
 const SMOOTHNESS_WINDOW: Record<ChartSmoothness, number> = {
   raw: 1,
   '3pt': 3,
@@ -333,97 +331,6 @@ function smoothRows(rows: ChartRow[], smoothness: ChartSmoothness) {
   })
 }
 
-function lastNumericIndex(rows: ChartRow[], key: CompareKey) {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (typeof rows[index][key] === 'number') {
-      return index
-    }
-  }
-
-  return -1
-}
-
-function SeriesEndLabel({
-  color,
-  cx,
-  cy,
-  dx = -6,
-  dy = -6,
-  index,
-  label,
-  targetIndex,
-  value,
-}: {
-  color: string
-  cx?: number
-  cy?: number
-  dx?: number
-  dy?: number
-  index?: number
-  label: string
-  targetIndex: number
-  value?: number
-}) {
-  if (
-    typeof cx !== 'number'
-    || typeof cy !== 'number'
-    || typeof index !== 'number'
-    || index !== targetIndex
-    || typeof value !== 'number'
-  ) {
-    return null
-  }
-
-  return (
-    <g>
-      <circle cx={cx} cy={cy} fill={color} fillOpacity={0.92} r={1.8} />
-      <text
-        fill={color}
-        fillOpacity={0.82}
-        fontFamily="IBM Plex Sans, sans-serif"
-        fontSize={10}
-        letterSpacing="0.04em"
-        textAnchor="end"
-        x={cx + dx}
-        y={cy + dy}
-      >
-        {label}
-      </text>
-    </g>
-  )
-}
-
-function renderSeriesEndLabel(
-  label: string,
-  color: string,
-  targetIndex: number,
-  offsets?: {
-    dx?: number
-    dy?: number
-  },
-) {
-  return function SeriesLabelRenderer(props: {
-    cx?: number
-    cy?: number
-    index?: number
-    value?: number
-  }) {
-    return (
-      <SeriesEndLabel
-        color={color}
-        cx={props.cx}
-        cy={props.cy}
-        dx={offsets?.dx}
-        dy={offsets?.dy}
-        index={props.index}
-        label={label}
-        targetIndex={targetIndex}
-        value={props.value}
-      />
-    )
-  }
-}
-
 function formatRelativeTick(
   slotValue: number,
   horizon: Exclude<ChartHorizon, 'full'>,
@@ -494,9 +401,6 @@ export function TrendChart({
   const chartRows = smoothRows(chart.rows, smoothness)
   const accentColor = direction === 'up' ? '#ffb04c' : '#74d1d6'
   const actualColor = 'rgba(244, 247, 252, 0.96)'
-  const compare1LastIndex = lastNumericIndex(chartRows, 'compare1')
-  const compare2LastIndex = lastNumericIndex(chartRows, 'compare2')
-  const compare3LastIndex = lastNumericIndex(chartRows, 'compare3')
   const compare1Color = 'rgba(95, 184, 255, 0.78)'
   const compare2Color = 'rgba(120, 212, 170, 0.78)'
   const compare3Color = 'rgba(201, 128, 168, 0.74)'
@@ -514,30 +418,30 @@ export function TrendChart({
 
   return (
     <div className="trend-chart">
-      {stackPeriods || currentWindowLabel ? (
-        <div className="trend-chart__bar">
-          <div className="trend-chart__legend trend-chart__legend--compare">
-            {stackPeriods
-              ? chart.comparisonLabels.map((label, index) => (
-                  <LegendItem
-                    color={
-                      index === 0
-                        ? compare1Color
-                        : index === 1
-                          ? compare2Color
-                          : compare3Color
-                    }
-                    key={label}
-                    label={label}
-                  />
-                ))
-              : null}
-          </div>
-          {currentWindowLabel ? (
-            <div className="trend-chart__window-label">{currentWindowLabel}</div>
-          ) : null}
+      <div className="trend-chart__bar">
+        <div className="trend-chart__legend">
+          <LegendItem color={actualColor} label="Actual" />
+          <LegendItem color={accentColor} dashed label="Expected" />
+          {stackPeriods
+            ? chart.comparisonLabels.map((label, index) => (
+                <LegendItem
+                  color={
+                    index === 0
+                      ? compare1Color
+                      : index === 1
+                        ? compare2Color
+                        : compare3Color
+                  }
+                  key={label}
+                  label={label}
+                />
+              ))
+            : null}
         </div>
-      ) : null}
+        {currentWindowLabel ? (
+          <div className="trend-chart__window-label">{currentWindowLabel}</div>
+        ) : null}
+      </div>
 
       <div className="trend-chart__surface">
         <ResponsiveContainer width="100%" height={316}>
@@ -576,14 +480,7 @@ export function TrendChart({
               activeDot={false}
               animationDuration={360}
               dataKey="actual"
-              dot={
-                stackPeriods
-                  ? renderSeriesEndLabel('Actual', actualColor, chartRows.length - 1, {
-                      dx: -6,
-                      dy: 12,
-                    })
-                  : false
-              }
+              dot={false}
               isAnimationActive
               stroke={actualColor}
               strokeWidth={2.3}
@@ -593,14 +490,7 @@ export function TrendChart({
               activeDot={false}
               animationDuration={360}
               dataKey="expected"
-              dot={
-                stackPeriods
-                  ? renderSeriesEndLabel('Expected', accentColor, chartRows.length - 1, {
-                      dx: -6,
-                      dy: -8,
-                    })
-                  : false
-              }
+              dot={false}
               isAnimationActive
               stroke={accentColor}
               strokeDasharray="5 5"
@@ -612,11 +502,7 @@ export function TrendChart({
                 activeDot={false}
                 animationDuration={360}
                 dataKey="compare1"
-                dot={renderSeriesEndLabel(
-                  chart.comparisonLabels[0] ?? 'Prev period',
-                  compare1Color,
-                  compare1LastIndex,
-                )}
+                dot={false}
                 isAnimationActive
                 stroke={compare1Color}
                 strokeWidth={1.45}
@@ -628,11 +514,7 @@ export function TrendChart({
                 activeDot={false}
                 animationDuration={360}
                 dataKey="compare2"
-                dot={renderSeriesEndLabel(
-                  chart.comparisonLabels[1] ?? '2 periods ago',
-                  compare2Color,
-                  compare2LastIndex,
-                )}
+                dot={false}
                 isAnimationActive
                 stroke={compare2Color}
                 strokeWidth={1.25}
@@ -644,11 +526,7 @@ export function TrendChart({
                 activeDot={false}
                 animationDuration={360}
                 dataKey="compare3"
-                dot={renderSeriesEndLabel(
-                  chart.comparisonLabels[2] ?? '3 periods ago',
-                  compare3Color,
-                  compare3LastIndex,
-                )}
+                dot={false}
                 isAnimationActive
                 stroke={compare3Color}
                 strokeWidth={1.1}
