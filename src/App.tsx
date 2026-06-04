@@ -34,13 +34,19 @@ import type {
   PaneKey,
 } from './types'
 
-const PANE_META: Array<{ key: PaneKey; label: string }> = [
-  { key: 'main', label: 'Queue' },
+type HorizonPane = Exclude<PaneKey, 'main'>
+
+// The four horizon panes are multi-selectable: pick any combination and the queue
+// shows the union of those horizons. The "Queue" chip is the empty selection — the
+// curated cross-horizon ranking.
+const HORIZON_PANES: Array<{ key: HorizonPane; label: string }> = [
   { key: '7d', label: '7D' },
   { key: '30d', label: '30D' },
   { key: 'quarter', label: 'QTR' },
   { key: 'year', label: 'Year' },
 ]
+
+const HORIZON_ORDER: HorizonPane[] = ['7d', '30d', 'quarter', 'year']
 
 const GEOGRAPHY_FILTERS: Array<{ key: GeographyType; label: string }> = [
   { key: 'citywide', label: 'Citywide' },
@@ -173,7 +179,8 @@ function DashboardWorkspace({
 }) {
   const navigate = useNavigate()
   const params = useParams<{ alertId?: string; entityId?: string }>()
-  const [activePane, setActivePane] = useState<PaneKey>('main')
+  // Empty set == the curated "Queue" view; any horizons selected == their union.
+  const [selectedHorizons, setSelectedHorizons] = useState<Set<HorizonPane>>(() => new Set())
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedGeographies, setSelectedGeographies] = useState<Set<GeographyType>>(
@@ -190,14 +197,41 @@ function DashboardWorkspace({
     [selectedGeographies],
   )
 
+  // The queue for a given horizon selection: the curated main queue when nothing is
+  // picked, otherwise the de-duplicated union of the chosen horizons ranked by each
+  // alert's score at its own horizon.
+  const rowsForSelection = useCallback(
+    (horizons: Set<HorizonPane>) => {
+      if (horizons.size === 0) {
+        return filterAlerts(dashboardData.mainQueue)
+      }
+
+      const seen = new Set<string>()
+      const union: AlertSummary[] = []
+
+      for (const horizon of HORIZON_ORDER) {
+        if (!horizons.has(horizon)) {
+          continue
+        }
+
+        for (const alert of dashboardData.fixedHorizon[horizon]) {
+          if (!seen.has(alert.id)) {
+            seen.add(alert.id)
+            union.push(alert)
+          }
+        }
+      }
+
+      return filterAlerts(union).sort(
+        (left, right) => right.horizonScores[right.horizon] - left.horizonScores[left.horizon],
+      )
+    },
+    [dashboardData.fixedHorizon, dashboardData.mainQueue, filterAlerts],
+  )
+
   const activeRows = useMemo(
-    () =>
-      filterAlerts(
-        activePane === 'main'
-          ? dashboardData.mainQueue
-          : dashboardData.fixedHorizon[activePane],
-      ),
-    [activePane, dashboardData.fixedHorizon, dashboardData.mainQueue, filterAlerts],
+    () => rowsForSelection(selectedHorizons),
+    [rowsForSelection, selectedHorizons],
   )
 
   const selectedAlertSummary = params.alertId
@@ -304,14 +338,10 @@ function DashboardWorkspace({
     navigate(`/explore/${encodeURIComponent(entityId)}`)
   }
 
-  function changePane(nextPane: PaneKey) {
-    startTransition(() => setActivePane(nextPane))
+  function applyHorizons(next: Set<HorizonPane>) {
+    startTransition(() => setSelectedHorizons(next))
 
-    const nextRows = filterAlerts(
-      nextPane === 'main'
-        ? dashboardData.mainQueue
-        : dashboardData.fixedHorizon[nextPane],
-    )
+    const nextRows = rowsForSelection(next)
 
     if (!selectedAlertSummary || !nextRows.some((row) => row.id === selectedAlertSummary.id)) {
       const nextAlert = nextRows[0]
@@ -320,6 +350,22 @@ function DashboardWorkspace({
         navigate(`/alerts/${nextAlert.id}`)
       }
     }
+  }
+
+  function toggleHorizon(horizon: HorizonPane) {
+    const next = new Set(selectedHorizons)
+
+    if (next.has(horizon)) {
+      next.delete(horizon)
+    } else {
+      next.add(horizon)
+    }
+
+    applyHorizons(next)
+  }
+
+  function selectQueue() {
+    applyHorizons(new Set())
   }
 
   function toggleGeography(geography: GeographyType) {
@@ -380,13 +426,22 @@ function DashboardWorkspace({
           <header className="worklist-pane__header">
             <div className="worklist-pane__toolbar">
               {!showExplorer ? (
-                <div className="queue-tabs">
-                  {PANE_META.map((pane) => (
+                <div className="queue-tabs" role="group" aria-label="Queue horizons">
+                  <button
+                    className={`queue-tabs__tab ${selectedHorizons.size === 0 ? 'is-active' : ''}`}
+                    aria-pressed={selectedHorizons.size === 0}
+                    type="button"
+                    onClick={selectQueue}
+                  >
+                    Queue
+                  </button>
+                  {HORIZON_PANES.map((pane) => (
                     <button
                       key={pane.key}
-                      className={`queue-tabs__tab ${activePane === pane.key ? 'is-active' : ''}`}
+                      className={`queue-tabs__tab ${selectedHorizons.has(pane.key) ? 'is-active' : ''}`}
+                      aria-pressed={selectedHorizons.has(pane.key)}
                       type="button"
-                      onClick={() => changePane(pane.key)}
+                      onClick={() => toggleHorizon(pane.key)}
                     >
                       {pane.label}
                     </button>
@@ -466,11 +521,11 @@ function DashboardWorkspace({
                 <span className="worklist-pane__summary">
                   {deferredQuery ? `${explorerResults.length} matches` : 'Browse categories'}
                 </span>
-              ) : activePane === 'main' ? (
+              ) : (
                 <span className="worklist-pane__summary">
-                  {activeRows.length} active alerts
+                  {activeRows.length} active {activeRows.length === 1 ? 'alert' : 'alerts'}
                 </span>
-              ) : null}
+              )}
             </div>
           </header>
 
@@ -508,7 +563,7 @@ function DashboardWorkspace({
                 key={selectedEntity.id}
                 onJumpToAlert={(alertId) => {
                   setQuery('')
-                  setActivePane('main')
+                  setSelectedHorizons(new Set())
                   navigate(`/alerts/${alertId}`)
                 }}
                 selection={{ entity: selectedEntity, kind: 'entity', topAlert }}
@@ -522,7 +577,7 @@ function DashboardWorkspace({
                 key={currentAlert.id}
                 onJumpToAlert={(alertId) => {
                   setQuery('')
-                  setActivePane('main')
+                  setSelectedHorizons(new Set())
                   navigate(`/alerts/${alertId}`)
                 }}
                 selection={{ alert: currentAlert, kind: 'alert' }}

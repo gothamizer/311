@@ -3,7 +3,7 @@ import { geoMercator, geoPath } from 'd3-geo'
 
 import communityDistricts from '../data/community-districts.json'
 import { formatCount, formatDelta } from '../lib/format'
-import type { DistrictDatum, GeographyType } from '../types'
+import type { DistrictDatum, GeographyType, Horizon } from '../types'
 
 type MapMode = 'volume' | 'concentration' | 'deviation'
 
@@ -13,6 +13,9 @@ interface DistrictMapProps {
   direction: 'up' | 'down'
   districts: DistrictDatum[]
   geographyType: GeographyType
+  // The alert's reporting window, used to make the mode descriptions say exactly
+  // which span the figures cover.
+  horizon?: Horizon
   // The problem this map decomposes, used in the mode descriptions.
   subjectLabel?: string
   // The board / borough that the alert itself is about, used to drive focus.
@@ -45,20 +48,49 @@ const districtShapes = communityDistricts as {
 
 const MODE_LABEL: Record<MapMode, string> = {
   volume: 'Volume',
-  concentration: 'Concentration',
+  concentration: 'Hotspots',
   deviation: 'Deviation',
 }
 
+// Districts below this many calls are too small a sample to earn a hotspot reading:
+// a board with a couple of calls can post an enormous share ratio that is pure noise.
+const HOTSPOT_MIN_VOLUME = 5
+
+// Plain-language span the figures cover, phrased to match the alert headline so the
+// map clearly states which window it is summarising.
+function windowPhrase(horizon?: Horizon) {
+  switch (horizon) {
+    case 'today':
+      return 'today'
+    case '7d':
+      return 'over the last 7 days'
+    case '30d':
+      return 'over the last 30 days'
+    case 'quarter':
+      return 'over the last 90 days'
+    case 'year':
+      return 'over the last 12 months'
+    default:
+      return ''
+  }
+}
+
 // Plain-language one-liner shown under the toggle so each mode reads clearly to a
-// non-technical reader.
-function modeDescription(mode: MapMode, subject: string) {
+// non-technical reader. Each says exactly what it is and over which window.
+function modeDescription(mode: MapMode, subject: string, horizon: Horizon | undefined, direction: 'up' | 'down') {
+  const span = windowPhrase(horizon)
+  const suffix = span ? ` ${span}` : ''
+
   switch (mode) {
     case 'volume':
-      return `How many ${subject} calls land in each district.`
+      return `${subject} calls in each district${suffix}.`
     case 'concentration':
-      return `Where ${subject} is over-represented versus a district's usual 311 load.`
+      // Location quotient, framed as share-of-mix: this problem's slice of a
+      // district's own 311 vs its slice citywide. Spelling it out this way keeps
+      // size and population from making big districts look hot everywhere.
+      return `Where ${subject} is a bigger part of a district's 311 calls than it is citywide — so its size and population don't crowd out smaller districts.`
     default:
-      return 'How far each district sits above or below its own seasonal baseline.'
+      return `How far ${direction === 'up' ? 'above' : 'below'} what's expected each district is running${suffix}.`
   }
 }
 
@@ -76,7 +108,7 @@ function locationQuotient(district: DistrictDatum, sumActual: number) {
   const share = sumActual > 0 ? district.actual / sumActual : 0
   const activity = district.activityShare ?? 0
 
-  if (activity <= 0 || share <= 0) {
+  if (activity <= 0 || share <= 0 || district.actual < HOTSPOT_MIN_VOLUME) {
     return undefined
   }
 
@@ -104,6 +136,7 @@ export function DistrictMap({
   direction,
   districts,
   geographyType,
+  horizon,
   subjectLabel,
   selectedBorough,
   selectedGeographyId,
@@ -225,12 +258,14 @@ export function DistrictMap({
     }
   }, [activeMode, direction, lqById])
 
-  const rankedRegion = useMemo(
+  // Districts are always ranked against the whole city, never just the alert's
+  // borough, so a board's standing reads the same everywhere on the map.
+  const rankedCitywide = useMemo(
     () =>
       districts
-        .filter((district) => district.hasData && isInRegion(district))
+        .filter((district) => district.hasData)
         .sort((left, right) => metricValue(right) - metricValue(left)),
-    [districts, isInRegion, metricValue],
+    [districts, metricValue],
   )
 
   const districtByCode = useMemo(
@@ -287,8 +322,7 @@ export function DistrictMap({
   }
 
   const isAnchorActive = activeDistrict.id === anchorDistrictId
-  const activeRank = rankedRegion.findIndex((district) => district.id === activeDistrict.id)
-  const regionLabel = geographyType === 'citywide' || !focusBorough ? 'citywide' : `in ${focusBorough}`
+  const activeRank = rankedCitywide.findIndex((district) => district.id === activeDistrict.id)
   const activeLq = lqById.get(activeDistrict.id)
 
   function selectDistrict(id: string) {
@@ -319,7 +353,7 @@ export function DistrictMap({
             </button>
           ))}
         </div>
-        <p className="district-map__mode-note">{modeDescription(activeMode, subject)}</p>
+        <p className="district-map__mode-note">{modeDescription(activeMode, subject, horizon, direction)}</p>
       </header>
 
       <div className="district-map__body">
@@ -384,19 +418,19 @@ export function DistrictMap({
               </div>
               {hasConcentration ? (
                 <div className={activeMode === 'concentration' ? 'is-active-metric' : ''}>
-                  <dt>Concentration</dt>
-                  <dd>{activeLq ? `${formatLq(activeLq)} usual share` : '—'}</dd>
+                  <dt>Local share</dt>
+                  <dd>{activeLq ? `${formatLq(activeLq)} citywide` : '—'}</dd>
                 </div>
               ) : null}
               <div className={activeMode === 'deviation' ? 'is-active-metric' : ''}>
                 <dt>vs. expected</dt>
                 <dd>{activeDistrict.hasData ? formatDelta(deviationPct(activeDistrict)) : '—'}</dd>
               </div>
-              {activeRank >= 0 && rankedRegion.length > 1 ? (
+              {activeRank >= 0 && rankedCitywide.length > 1 ? (
                 <div>
                   <dt>Rank</dt>
                   <dd>
-                    #{activeRank + 1} of {rankedRegion.length} {regionLabel}
+                    #{activeRank + 1} of {rankedCitywide.length} citywide
                   </dd>
                 </div>
               ) : null}
@@ -444,7 +478,7 @@ function cellFill(mode: MapMode, direction: 'up' | 'down', position: number) {
 
 const LEGEND_ENDS: Record<string, [string, string]> = {
   volume: ['Fewer', 'More'],
-  concentration: ['Typical', 'Concentrated'],
+  concentration: ['Typical', 'Hotspot'],
   up: ['On baseline', 'Far above'],
   down: ['On baseline', 'Far below'],
 }
