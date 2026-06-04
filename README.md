@@ -25,7 +25,7 @@ It runs on pushes to `main`, manual dispatch, and a daily schedule at 10:17 UTC.
 
 ## Notes
 
-- The dashboard is generated from the live NYC Open Data 311 feed with a rolling three-year window.
+- The dashboard is generated from the live NYC Open Data 311 feed with a rolling five-year window.
 - Refreshes choose the latest complete reporting day dynamically by comparing recent daily row counts against same-weekday history. `DASHBOARD_FALLBACK_DATA_LAG_DAYS=3` is used only if the completeness preflight cannot find a usable candidate.
 - `npm run refresh:data` writes the static dashboard payloads into [public/data](/Users/uzairqadir/Projects/work/311/public/data).
 - The ranked queue is built from all current active alerts, while the category explorer loads heavier entity detail on demand.

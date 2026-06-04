@@ -23,11 +23,19 @@ export interface DailyPoint {
   expected: number
 }
 
-export interface Contributor {
+export interface AlertDetail {
   actual: number
+  baselineLabel: string
+  deltaPct: number
+  deviationSigma: number
+  direction: Direction
   expected: number
   name: string
+  // Share of the parent alert's excess (or deficit) attributable to this detail.
   share: number
+  // Self-contained daily series so the UI can filter the alert to this detail and
+  // recompute the metric strip and trend chart without another fetch.
+  timeline: DailyPoint[]
 }
 
 export interface Geography {
@@ -45,33 +53,27 @@ export interface DistrictDatum {
   actual: number
   code: string
   expected: number
+  // False when no volume was observed for this problem in the board; such cells
+  // render neutral instead of as if they were sitting exactly on baseline.
+  hasData: boolean
   intensity: number
   isFocus: boolean
-}
-
-export interface SignalBreakdown {
-  artifactPenalty: number
-  breadth: number
-  impact: number
-  persistence: number
-  severity: number
-  specificity: number
 }
 
 export interface AlertSummary {
   actual: number
   artifacts: ArtifactFlag[]
+  baselineLabel: string
   deltaPct: number
   detail?: string
+  deviationSigma: number
   direction: Direction
   expected: number
   geography: Geography
   horizon: Horizon
   horizonScores: Record<Horizon, number>
   id: string
-  priority: number
   problem: string
-  projectedPercentile?: number
   sparkline: number[]
   summary: string
   surfaceLevel: SurfaceLevel
@@ -80,15 +82,11 @@ export interface AlertSummary {
 
 export interface AlertRecord extends AlertSummary {
   comparabilityStart: string
-  contributors: Contributor[]
+  details: AlertDetail[]
   historyTimeline: DailyPoint[]
   map: DistrictDatum[]
-  queueReason: string
-  secondarySignals: string[]
-  signal: SignalBreakdown
   tags: string[]
   timeline: DailyPoint[]
-  whyItMatters: string
 }
 
 export interface GeographyScore {
@@ -116,7 +114,7 @@ export interface EntitySummary {
 
 export interface EntityRecord extends EntitySummary {
   artifacts: ArtifactFlag[]
-  contributors: Contributor[]
+  details: AlertDetail[]
   geographyBreakdown: GeographyScore[]
   historyTimeline: DailyPoint[]
   map: DistrictDatum[]

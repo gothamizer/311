@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "refresh:data": "node scripts/build-dashboard.mjs"
+    "refresh:data": "node scripts/build-dashboard.mjs",
+    "validate:data": "node scripts/validate-dashboard.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans": "^5.2.8",
