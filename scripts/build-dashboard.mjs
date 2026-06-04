@@ -4,7 +4,7 @@ import path from 'node:path'
 
 const DATASET_ID = 'erm2-nwe9'
 const SOCRATA_BASE_URL = `https://data.cityofnewyork.us/resource/${DATASET_ID}.json`
-const SOCRATA_APP_TOKEN = readRequiredEnv('NYC_OPEN_DATA_APP_TOKEN')
+const SOCRATA_APP_TOKEN = readRequiredEnv('NYC_OPENDATA_APP_TOKEN', 'NYC_OPEN_DATA_APP_TOKEN')
 const SOCRATA_REQUEST_TIMEOUT_MS = Number(process.env.SOCRATA_REQUEST_TIMEOUT_MS ?? 300_000)
 const OUTPUT_ROOT = path.resolve('public/data')
 const ALERT_OUTPUT_ROOT = path.join(OUTPUT_ROOT, 'alerts')
@@ -2409,14 +2409,16 @@ function aggregateCachePath(query) {
   return path.join(AGGREGATE_CACHE_ROOT, `${hash}.json`)
 }
 
-function readRequiredEnv(name) {
-  const value = process.env[name]
+function readRequiredEnv(...names) {
+  for (const name of names) {
+    const value = process.env[name]
 
-  if (!value) {
-    throw new Error(`${name} is required for authenticated NYC Open Data requests`)
+    if (value) {
+      return value
+    }
   }
 
-  return value
+  throw new Error(`${names.join(' or ')} is required for authenticated NYC Open Data requests`)
 }
 
 function median(values) {

@@ -54,7 +54,9 @@ jobs:
             dashboard-aggregates-
 
       - name: Refresh dashboard data
+        if: github.event_name != 'push'
         env:
+          NYC_OPENDATA_APP_TOKEN: ${{ secrets.NYC_OPENDATA_APP_TOKEN }}
           NYC_OPEN_DATA_APP_TOKEN: ${{ secrets.NYC_OPEN_DATA_APP_TOKEN }}
         run: npm run refresh:data
 
