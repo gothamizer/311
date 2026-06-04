@@ -80,11 +80,16 @@ button {
 }
 
 .app-shell {
-  min-height: 100svh;
+  height: 100svh;
+  overflow: hidden;
 }
 
+/* The shell is pinned to the viewport; each pane owns its own scroll so the two
+   toolbars/headers stay put and the columns scroll independently instead of the
+   whole page moving as one tall sheet. */
 .workspace-grid {
-  min-height: 100svh;
+  height: 100%;
+  overflow: hidden;
   display: grid;
   grid-template-columns: minmax(21rem, 29rem) minmax(0, 1fr);
 }
@@ -483,11 +488,17 @@ button {
   stroke: var(--cool);
 }
 
+/* One vertical rhythm for the whole detail stack: identity/metrics, drivers, chart
+   controls, chart, and map are spaced on a single scale instead of each carrying its
+   own ad-hoc padding, so the dense rows breathe evenly at every width. */
 .detail-panel {
   height: 100%;
   overflow: auto;
   scrollbar-gutter: stable;
-  padding: 0.62rem 0.92rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 0.72rem 0.92rem 1.4rem;
 }
 
 .detail-panel__headline {
@@ -495,7 +506,6 @@ button {
   grid-template-columns: minmax(0, 1fr) max-content;
   gap: 0.2rem 1.5rem;
   align-items: start;
-  padding-bottom: 0.14rem;
 }
 
 .detail-panel__headline-copy {
@@ -606,9 +616,12 @@ button {
   white-space: nowrap;
 }
 
+/* Chart controls open the interactive zone: a hairline above them separates the
+   "what this alert is" header (identity, metrics, drivers) from the chart they drive. */
 .detail-panel__controls {
   display: block;
-  padding: 0.1rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
 }
 
 .detail-panel__controls-row {
@@ -665,9 +678,10 @@ button {
   accent-color: var(--alert);
 }
 
-.trend-chart,
-.detail-section {
-  padding-top: 0.38rem;
+/* The chart hugs its controls (small gap, no separator); the geography section that
+   follows the map on entity views keeps a hairline of its own further down. */
+.trend-chart {
+  margin-top: -0.2rem;
 }
 
 /* The map fills the pane width: a mode toggle on top, then a large square
@@ -680,7 +694,6 @@ button {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  margin-top: 0.7rem;
   padding-top: 0.9rem;
   border-top: 1px solid var(--line);
 }
@@ -997,7 +1010,6 @@ button {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.4rem 0.85rem;
-  padding: 0.1rem 0 0;
 }
 
 .detail-badges__row {
@@ -1098,8 +1110,20 @@ button {
     grid-template-columns: minmax(19rem, 26rem) minmax(0, 1fr);
   }
 
+  /* Once the strip stacks under the title it must share the title's left edge,
+     otherwise the right-aligned figures read as a detached second panel. */
   .detail-panel__headline {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-panel__metric-strip {
+    justify-content: flex-start;
+    justify-self: start;
+  }
+
+  .detail-panel__metric-card,
+  .detail-panel__metric-caption {
+    text-align: left;
   }
 }
 
@@ -1134,24 +1158,9 @@ button {
     -webkit-line-clamp: 2;
   }
 
-  .detail-panel__headline,
   .trend-chart__bar {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .detail-panel__headline {
-    grid-template-columns: 1fr;
-  }
-
-  .detail-panel__metric-strip {
-    justify-content: flex-start;
-    justify-self: start;
-  }
-
-  .detail-panel__metric-card,
-  .detail-panel__metric-caption {
-    text-align: left;
   }
 
   .worklist-pane__toolbar,

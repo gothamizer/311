@@ -40,6 +40,9 @@ function getDefaultChartHorizon(baseHorizon: AlertRecord['horizon'] | EntityReco
   return baseHorizon === 'today' ? '7d' : baseHorizon
 }
 
+// Sane default smoothing per timeframe: none for a 7-day view (only 7 points), a
+// 3-day average over a month, a 7-day average over a quarter, and none for the
+// aggregated year/full views where day-based smoothing does not apply.
 function getDefaultChartSmoothness(chartHorizon: ChartHorizon): ChartSmoothness {
   if (chartHorizon === '30d') {
     return '3pt'
@@ -50,6 +53,14 @@ function getDefaultChartSmoothness(chartHorizon: ChartHorizon): ChartSmoothness 
   }
 
   return 'raw'
+}
+
+// Day-based moving averages only make sense while the chart is at daily resolution.
+// The year view aggregates to months and the full view to quarters, where a 3- or
+// 7-day window would silently average across whole months/quarters — so the control
+// is hidden and no smoothing is applied there.
+function isDailyChartHorizon(horizon: ChartHorizon) {
+  return horizon === '7d' || horizon === '30d' || horizon === 'quarter'
 }
 
 function getDefaultStackPeriods(chartHorizon: ChartHorizon) {
@@ -385,30 +396,35 @@ export function DetailPanel({
                   key={value}
                   className={`chart-control ${chartHorizon === value ? 'is-active' : ''}`}
                   type="button"
-                  onClick={() => setChartHorizon(value)}
+                  onClick={() => {
+                    setChartHorizon(value)
+                    setChartSmoothness(getDefaultChartSmoothness(value))
+                  }}
                 >
                   {label}
                 </button>
               ))}
             </div>
 
-            <div className="detail-panel__control-group detail-panel__control-group--inline">
-              <span className="detail-panel__control-label">Trend line</span>
-              {([
-                ['raw', 'Daily'],
-                ['3pt', '3d avg'],
-                ['7pt', '7d avg'],
-              ] as const).map(([value, label]) => (
-                <button
-                  key={value}
-                  className={`chart-control ${chartSmoothness === value ? 'is-active' : ''}`}
-                  type="button"
-                  onClick={() => setChartSmoothness(value)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            {isDailyChartHorizon(chartHorizon) ? (
+              <div className="detail-panel__control-group detail-panel__control-group--inline">
+                <span className="detail-panel__control-label">Trend line</span>
+                {([
+                  ['raw', 'Daily'],
+                  ['3pt', '3d avg'],
+                  ['7pt', '7d avg'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    className={`chart-control ${chartSmoothness === value ? 'is-active' : ''}`}
+                    type="button"
+                    onClick={() => setChartSmoothness(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             {chartHorizon !== 'full' ? (
               <div className="detail-panel__control-group detail-panel__control-group--inline">
@@ -441,6 +457,7 @@ export function DetailPanel({
           geographyType={
             selection.kind === 'alert' ? selection.alert.geography.type : 'citywide'
           }
+          horizon={selection.kind === 'alert' ? selection.alert.horizon : baseHorizon}
           selectedBorough={
             selection.kind === 'alert' ? selection.alert.geography.borough : undefined
           }

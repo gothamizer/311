@@ -398,7 +398,12 @@ export function TrendChart({
   stackPeriods,
 }: TrendChartProps) {
   const chart = prepareChart(points, historyPoints, horizon, stackPeriods)
-  const chartRows = smoothRows(chart.rows, smoothness)
+  // The year view is monthly and the full view is quarterly; a day-based moving
+  // average there would average across whole months/quarters, so smoothing only
+  // applies while the series is at daily resolution.
+  const isDailyResolution = horizon !== 'year' && horizon !== 'full'
+  const effectiveSmoothness: ChartSmoothness = isDailyResolution ? smoothness : 'raw'
+  const chartRows = smoothRows(chart.rows, effectiveSmoothness)
   const accentColor = direction === 'up' ? '#ffb04c' : '#74d1d6'
   const actualColor = 'rgba(244, 247, 252, 0.96)'
   const compare1Color = 'rgba(95, 184, 255, 0.78)'
@@ -484,7 +489,7 @@ export function TrendChart({
               isAnimationActive
               stroke={actualColor}
               strokeWidth={2.3}
-              type={smoothness === 'raw' ? 'linear' : 'monotone'}
+              type={effectiveSmoothness === 'raw' ? 'linear' : 'monotone'}
             />
             <Line
               activeDot={false}
@@ -495,7 +500,7 @@ export function TrendChart({
               stroke={accentColor}
               strokeDasharray="5 5"
               strokeWidth={1.8}
-              type={smoothness === 'raw' ? 'linear' : 'monotone'}
+              type={effectiveSmoothness === 'raw' ? 'linear' : 'monotone'}
             />
             {stackPeriods && chartRows.some((row) => typeof row.compare1 === 'number') ? (
               <Line
@@ -506,7 +511,7 @@ export function TrendChart({
                 isAnimationActive
                 stroke={compare1Color}
                 strokeWidth={1.45}
-                type={smoothness === 'raw' ? 'linear' : 'monotone'}
+                type={effectiveSmoothness === 'raw' ? 'linear' : 'monotone'}
               />
             ) : null}
             {stackPeriods && chartRows.some((row) => typeof row.compare2 === 'number') ? (
@@ -518,7 +523,7 @@ export function TrendChart({
                 isAnimationActive
                 stroke={compare2Color}
                 strokeWidth={1.25}
-                type={smoothness === 'raw' ? 'linear' : 'monotone'}
+                type={effectiveSmoothness === 'raw' ? 'linear' : 'monotone'}
               />
             ) : null}
             {stackPeriods && chartRows.some((row) => typeof row.compare3 === 'number') ? (
@@ -530,7 +535,7 @@ export function TrendChart({
                 isAnimationActive
                 stroke={compare3Color}
                 strokeWidth={1.1}
-                type={smoothness === 'raw' ? 'linear' : 'monotone'}
+                type={effectiveSmoothness === 'raw' ? 'linear' : 'monotone'}
               />
             ) : null}
           </LineChart>
