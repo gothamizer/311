@@ -30,6 +30,15 @@ const AGGREGATE_PAGE_SIZE = Number(process.env.DASHBOARD_PAGE_SIZE ?? 500_000)
 const PAGE_LIMIT = process.env.DASHBOARD_PAGE_LIMIT ? Number(process.env.DASHBOARD_PAGE_LIMIT) : undefined
 const PARTITION_MONTHS = Number(process.env.DASHBOARD_PARTITION_MONTHS ?? 3)
 const CACHE_REFRESH_LOOKBACK_DAYS = Number(process.env.DASHBOARD_CACHE_REFRESH_LOOKBACK_DAYS ?? COMPLETENESS_LOOKBACK_DAYS)
+// Per-geography minimum lifetime volume for a descriptor series to be kept. Board
+// level is where full detail explodes (~61k series), and a board×descriptor with a
+// handful of calls over five years is auto-sparse — it never alerts and adds nothing
+// to a breakdown — so it carries a higher floor than the cheap citywide/borough tiers.
+const DETAIL_MIN_TOTAL = {
+  citywide: Number(process.env.DASHBOARD_DETAIL_MIN_CITYWIDE ?? 5),
+  borough: Number(process.env.DASHBOARD_DETAIL_MIN_BOROUGH ?? 10),
+  'community-board': Number(process.env.DASHBOARD_DETAIL_MIN_BOARD ?? 25),
+}
 const ACTIVE_PRIORITY_FLOOR = 58
 const LONG_HORIZON_ACTIVE_SCORE = 12
 const HORIZON_MINIMUMS = {
@@ -90,7 +99,7 @@ async function main() {
     startDate: START_DATE,
   })
   const topDetailProblems = await selectTopDetailProblems(citywideProblemRows)
-  console.log(`Tracking detail series for ${topDetailProblems.length} high-volume problems`)
+  console.log(`Pulling descriptor detail for ALL complaint types (top-volume reference list: ${topDetailProblems.length})`)
   const boroughProblemRows = await fetchPartitionedAggregates({
     label: 'problem-borough',
     extraWhere: `borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))})`,
@@ -107,31 +116,49 @@ async function main() {
     select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'community_board', 'count(*) as n'],
     startDate: START_DATE,
   })
-  const citywideDetailRows = await fetchPartitionedAggregates({
-    label: 'detail-citywide',
-    extraWhere: `descriptor is not null AND complaint_type in (${quoteList(topDetailProblems)})`,
-    group: ['day', 'complaint_type', 'descriptor'],
-    partitionMonths: PARTITION_MONTHS,
-    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'count(*) as n'],
-    startDate: START_DATE,
-  })
-  const boroughDetailRows = await fetchPartitionedAggregates({
-    label: 'detail-borough',
-    extraWhere: `descriptor is not null AND borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))}) AND complaint_type in (${quoteList(topDetailProblems)})`,
-    group: ['day', 'complaint_type', 'descriptor', 'borough'],
-    partitionMonths: PARTITION_MONTHS,
-    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'borough', 'count(*) as n'],
-    startDate: START_DATE,
-  })
-
   const problemSeries = new Map()
   const detailSeries = new Map()
 
   ingestProblemRows(problemSeries, citywideProblemRows, 'citywide')
   ingestProblemRows(problemSeries, boroughProblemRows, 'borough')
   ingestProblemRows(problemSeries, boardProblemRows, 'community-board')
-  ingestDetailRows(detailSeries, citywideDetailRows, 'citywide')
-  ingestDetailRows(detailSeries, boroughDetailRows, 'borough')
+
+  // Full-fidelity detail pull ("Option E"): descriptor-level series for EVERY
+  // complaint type at citywide + borough + community-board. Streamed per partition
+  // straight into detailSeries (onPartition) so the multi-million-row board-detail
+  // set is never held whole in memory. Raw partition aggregates are still written to
+  // the on-disk cache, so this expensive historical backfill is paid once; daily runs
+  // only refetch the trailing (unstable) partitions.
+  await fetchPartitionedAggregates({
+    label: 'detail-citywide',
+    extraWhere: 'descriptor is not null',
+    group: ['day', 'complaint_type', 'descriptor'],
+    onPartition: (rows) => ingestDetailRows(detailSeries, rows, 'citywide'),
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+  await fetchPartitionedAggregates({
+    label: 'detail-borough',
+    extraWhere: `descriptor is not null AND borough in (${quoteList(Object.keys(BOROUGH_NAME_TO_ID))})`,
+    group: ['day', 'complaint_type', 'descriptor', 'borough'],
+    onPartition: (rows) => ingestDetailRows(detailSeries, rows, 'borough'),
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'borough', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+  await fetchPartitionedAggregates({
+    label: 'detail-board',
+    extraWhere: 'descriptor is not null AND community_board is not null',
+    group: ['day', 'complaint_type', 'descriptor', 'community_board'],
+    onPartition: (rows) => ingestDetailRows(detailSeries, rows, 'community-board'),
+    partitionMonths: PARTITION_MONTHS,
+    select: ['date_trunc_ymd(created_date) as day', 'complaint_type', 'descriptor', 'community_board', 'count(*) as n'],
+    startDate: START_DATE,
+  })
+
+  pruneLowVolumeDetailSeries(detailSeries)
+  console.log(`Detail series after ingest: ${detailSeries.size}`)
 
   // Each board's share of all 311 activity (every complaint type, full window). A
   // stable "how busy is this district in general" denominator so the map's
@@ -442,11 +469,15 @@ async function fetchPartitionedAggregates({
   extraWhere,
   group,
   label,
+  onPartition,
   partitionMonths,
   select,
   startDate,
 }) {
-  const rows = []
+  // When onPartition is supplied we stream each partition's rows to the caller and
+  // never accumulate the full result set — essential for the board-level detail pull,
+  // whose 5-year row count would otherwise sit in memory all at once.
+  const rows = onPartition ? null : []
 
   for (const partition of buildPartitions(startDate, END_DATE, partitionMonths)) {
     const partitionLabel = `${label}:${formatDateKey(partition.startDate)}`
@@ -461,8 +492,12 @@ async function fetchPartitionedAggregates({
       write: true,
     })
 
-    for (const row of partitionRows) {
-      rows.push(row)
+    if (onPartition) {
+      onPartition(partitionRows)
+    } else {
+      for (const row of partitionRows) {
+        rows.push(row)
+      }
     }
   }
 
@@ -638,6 +673,43 @@ function ingestProblemRows(seriesMap, rows, geographyType) {
   }
 }
 
+// Optional floor on a descriptor series' total volume over the whole window. With
+// full board-level detail the long tail is dominated by (descriptor, board) pairs
+// that logged a handful of lifetime calls — noise that still costs an entry to score
+// and bytes to ship. Pruning them is the main payload lever. Default 0 keeps
+// everything so we can measure the true maximum before deciding where to cut.
+function pruneLowVolumeDetailSeries(seriesMap) {
+  const removed = { citywide: 0, borough: 0, 'community-board': 0 }
+  let pruned = false
+
+  for (const [key, series] of seriesMap) {
+    const floor = DETAIL_MIN_TOTAL[series.geography.type] ?? 0
+
+    if (floor <= 0) {
+      continue
+    }
+
+    pruned = true
+    let total = 0
+
+    for (let index = 1; index < series.counts.length; index += 2) {
+      total += series.counts[index]
+    }
+
+    if (total < floor) {
+      seriesMap.delete(key)
+      removed[series.geography.type] += 1
+    }
+  }
+
+  if (pruned) {
+    console.log(
+      `Pruned detail series (floors cw>=${DETAIL_MIN_TOTAL.citywide} boro>=${DETAIL_MIN_TOTAL.borough} board>=${DETAIL_MIN_TOTAL['community-board']}): ` +
+        `cw=${removed.citywide} boro=${removed.borough} board=${removed['community-board']}; ${seriesMap.size} remain`,
+    )
+  }
+}
+
 function ingestDetailRows(seriesMap, rows, geographyType) {
   for (const row of rows) {
     const dayIndex = DATE_INDEX.get(row.day.slice(0, 10))
@@ -656,7 +728,9 @@ function ingestDetailRows(seriesMap, rows, geographyType) {
     const geographyId =
       geographyType === 'citywide'
         ? 'citywide'
-        : BOROUGH_NAME_TO_ID[row.borough]
+        : geographyType === 'borough'
+          ? BOROUGH_NAME_TO_ID[row.borough]
+          : parseCommunityBoard(row.community_board)?.id
 
     if (!geographyId) {
       continue
@@ -696,6 +770,10 @@ function evaluateSeriesCollection(seriesMap, options) {
     if (evaluation) {
       evaluations.push(evaluation)
     }
+
+    // Raw per-day counts aren't needed once a series is evaluated. Releasing them
+    // here keeps peak heap down across the full all-problem detail set (~31k series).
+    series.counts = null
   }
 
   return evaluations
@@ -1687,9 +1765,13 @@ function buildDetails(evaluation, detailIndex) {
     })
   const totalContribution = rankedRows.reduce((sum, row) => sum + row.contribution, 0)
 
+  // Ship every contributing descriptor, ordered by volume (largest first). The UI
+  // shows as many chips as fit and folds the lowest-volume remainder into an "Other"
+  // menu, so there is no fixed cap here; the contribution filter already limits this
+  // to drivers actually active in the alert's window.
   return rankedRows
     .filter((row) => row.contribution > 0)
-    .slice(0, 6)
+    .sort((left, right) => right.actual - left.actual)
     .map((row) => {
       const deltaPct = row.expected > 0 ? ((row.actual - row.expected) / row.expected) * 100 : 0
 

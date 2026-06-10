@@ -31,7 +31,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # Day-to-day refreshes are incremental (~10 min) thanks to the aggregate cache.
+    # The first run after the full board-level detail rollout has no cache and must
+    # backfill ~5 years of descriptor x community-board aggregates (~3h locally), so
+    # the ceiling is raised to let that one-time backfill complete and persist its
+    # cache. GitHub-hosted jobs cap at 360 min.
+    timeout-minutes: 350
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -58,6 +63,9 @@ jobs:
         env:
           NYC_OPENDATA_APP_TOKEN: ${{ secrets.NYC_OPENDATA_APP_TOKEN }}
           NYC_OPEN_DATA_APP_TOKEN: ${{ secrets.NYC_OPEN_DATA_APP_TOKEN }}
+          # Evaluating the full all-problem detail set (~31k series after the volume
+          # floors) peaks around 10 GB; give Node headroom on the 16 GB runner.
+          NODE_OPTIONS: --max-old-space-size=14336
         run: npm run refresh:data
 
       - name: Validate dashboard data
