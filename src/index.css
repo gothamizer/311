@@ -611,8 +611,6 @@ button {
    "what this alert is" header (identity, metrics, drivers) from the chart they drive. */
 .detail-panel__controls {
   display: block;
-  padding-top: 0.9rem;
-  border-top: 1px solid var(--line);
 }
 
 .detail-panel__controls-row {
