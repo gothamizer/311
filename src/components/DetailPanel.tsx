@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import {
   compactSummary,
@@ -108,6 +109,22 @@ function MetricCard({
 
 // One descriptor rendered as a clickable chip. Colour intensity tracks the share of
 // the parent excess so the heaviest contributors read strongest at a glance.
+// A floating tooltip portaled to <body> so it escapes the detail panel's scroll
+// clipping and any framer-motion transform context. Carries the full descriptor name
+// (chips truncate) plus the numbers and share that no longer crowd the chip face.
+function DetailTip({ meta, name, pos }: { meta: string; name: string; pos: { left: number; top: number } }) {
+  return createPortal(
+    <div className="detail-tip" style={{ left: pos.left, top: pos.top }}>
+      <span className="detail-tip__name">{name}</span>
+      <span className="detail-tip__meta">{meta}</span>
+    </div>,
+    document.body,
+  )
+}
+
+// One descriptor rendered as a clickable chip. The swatch intensity tracks the share
+// of the parent excess; the exact numbers live in the hover tooltip rather than on the
+// chip face.
 function DetailBadge({
   detail,
   direction,
@@ -121,25 +138,269 @@ function DetailBadge({
   maxShare: number
   onToggle: (name: string) => void
 }) {
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null)
   const weight = maxShare > 0 ? Math.min(1, detail.share / maxShare) : 0
   const accent =
     direction === 'up'
       ? `rgba(255, 176, 76, ${0.16 + weight * 0.62})`
       : `rgba(116, 209, 214, ${0.16 + weight * 0.62})`
+  const meta = `${formatCount(detail.actual)} vs ${formatCount(detail.expected)} expected · ${formatDelta(detail.deltaPct)} · ${formatSigma(detail.deviationSigma)} ${detail.baselineLabel} · ${detail.share}% of the move`
+
+  const showTip = (event: React.SyntheticEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    setTipPos({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 296)), top: rect.top - 8 })
+  }
 
   return (
     <button
+      aria-label={`${detail.name}: ${meta}`}
       aria-pressed={isActive}
       className={`detail-badge ${isActive ? 'is-active' : ''}`}
       style={{ '--badge-accent': accent } as React.CSSProperties}
-      title={`${detail.name}: ${formatCount(detail.actual)} vs ${formatCount(detail.expected)} expected · ${formatDelta(detail.deltaPct)} · ${formatSigma(detail.deviationSigma)} ${detail.baselineLabel} · ${detail.share}% of the move`}
       type="button"
+      onBlur={() => setTipPos(null)}
       onClick={() => onToggle(detail.name)}
+      onFocus={showTip}
+      onMouseEnter={showTip}
+      onMouseLeave={() => setTipPos(null)}
     >
       <span className="detail-badge__swatch" aria-hidden="true" />
       <span className="detail-badge__name">{detail.name}</span>
-      <span className="detail-badge__share">{detail.share}%</span>
+      {tipPos ? <DetailTip meta={meta} name={detail.name} pos={tipPos} /> : null}
     </button>
+  )
+}
+
+// Renders descriptor chips that fill the available width, folding the lowest-volume
+// remainder into an "Other (N)" chip that opens a menu of the rest. Details arrive
+// volume-sorted from the build, so what spills into Other is always the least
+// voluminous. A hidden measurement layer carries every chip at its natural width so
+// the fit can be recomputed on resize without affecting layout.
+function DetailBadgeRow({
+  activeDetail,
+  details,
+  direction,
+  maxShare,
+  onToggle,
+}: {
+  activeDetail: string | undefined
+  details: AlertDetail[]
+  direction: Direction
+  maxShare: number
+  onToggle: (name: string) => void
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const [visibleCount, setVisibleCount] = useState(details.length)
+  const [menuPos, setMenuPos] = useState<{ left: number; maxHeight: number; top: number } | null>(null)
+  const menuOpen = menuPos !== null
+
+  const closeMenu = (returnFocus: boolean) => {
+    setMenuPos(null)
+    if (returnFocus) {
+      triggerRef.current?.focus()
+    }
+  }
+
+  // Roving keyboard navigation inside the (portaled) menu so the menu role is honest:
+  // arrows move between items, Home/End jump, Enter/Space activate (native button),
+  // Escape/Tab dismiss and return focus to the trigger.
+  const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+    if (!items.length) {
+      return
+    }
+    const current = items.indexOf(document.activeElement as HTMLButtonElement)
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      items[(current + 1) % items.length].focus()
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      items[(current - 1 + items.length) % items.length].focus()
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      items[0].focus()
+    } else if (event.key === 'End') {
+      event.preventDefault()
+      items[items.length - 1].focus()
+    } else if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault()
+      closeMenu(true)
+    }
+  }
+
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current
+    const measure = measureRef.current
+    if (!wrap || !measure) {
+      return
+    }
+
+    const recompute = () => {
+      const available = wrap.clientWidth
+      if (!available) {
+        return
+      }
+      const nodes = Array.from(measure.children) as HTMLElement[]
+      const otherNode = nodes[nodes.length - 1]
+      const chipNodes = nodes.slice(0, details.length)
+      const gap = parseFloat(getComputedStyle(measure).columnGap || '0') || 0
+      const widthOf = (node: HTMLElement) => node.getBoundingClientRect().width
+
+      let total = 0
+      chipNodes.forEach((node, index) => {
+        total += widthOf(node) + (index ? gap : 0)
+      })
+      if (total <= available) {
+        setVisibleCount(details.length)
+        return
+      }
+
+      const otherWidth = widthOf(otherNode)
+      let used = 0
+      let count = 0
+      for (let index = 0; index < chipNodes.length; index += 1) {
+        const next = used + (count ? gap : 0) + widthOf(chipNodes[index])
+        if (next + gap + otherWidth > available) {
+          break
+        }
+        used = next
+        count += 1
+      }
+      setVisibleCount(Math.max(1, count))
+    }
+
+    recompute()
+    const observer = new ResizeObserver(recompute)
+    observer.observe(wrap)
+    return () => observer.disconnect()
+  }, [details])
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return
+    }
+    // Move focus into the menu so keyboard users land on the first option.
+    menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    const close = () => setMenuPos(null)
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node
+      // The menu is portaled to <body>, so it isn't inside wrapRef — exempt it too.
+      if (!wrapRef.current?.contains(target) && !menuRef.current?.contains(target)) {
+        close()
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+    }
+  }, [menuOpen])
+
+  const safeCount = Math.min(visibleCount, details.length)
+  const visible = details.slice(0, safeCount)
+  const overflow = details.slice(safeCount)
+
+  return (
+    <div className="detail-badges__wrap" ref={wrapRef}>
+      <div aria-hidden className="detail-badges__row detail-badges__measure" ref={measureRef}>
+        {details.map((detail) => (
+          <DetailBadge
+            key={detail.name}
+            detail={detail}
+            direction={direction}
+            isActive={false}
+            maxShare={maxShare}
+            onToggle={() => {}}
+          />
+        ))}
+        <span className="detail-badge detail-badge--other">
+          <span className="detail-badge__name">+99</span>
+          <span className="detail-badge__caret" aria-hidden="true">▾</span>
+        </span>
+      </div>
+
+      <div className="detail-badges__row detail-badges__row--live">
+        {visible.map((detail) => (
+          <DetailBadge
+            key={detail.name}
+            detail={detail}
+            direction={direction}
+            isActive={detail.name === activeDetail}
+            maxShare={maxShare}
+            onToggle={onToggle}
+          />
+        ))}
+        {overflow.length ? (
+          <div className="detail-badges__overflow">
+            <button
+              ref={triggerRef}
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              aria-label={`Show ${overflow.length} more drivers`}
+              className={`detail-badge detail-badge--other ${menuOpen ? 'is-open' : ''}`}
+              type="button"
+              onClick={(event) => {
+                if (menuOpen) {
+                  setMenuPos(null)
+                  return
+                }
+                const rect = event.currentTarget.getBoundingClientRect()
+                const estHeight = Math.min(272, overflow.length * 32 + 12)
+                const spaceBelow = window.innerHeight - rect.bottom - 8
+                const spaceAbove = rect.top - 8
+                const openUp = estHeight > spaceBelow && spaceAbove > spaceBelow
+                setMenuPos({
+                  left: Math.max(8, Math.min(rect.right - 240, window.innerWidth - 248)),
+                  maxHeight: Math.max(120, openUp ? spaceAbove : spaceBelow),
+                  top: openUp
+                    ? Math.max(8, rect.top - 6 - Math.min(estHeight, spaceAbove))
+                    : rect.bottom + 6,
+                })
+              }}
+            >
+              <span className="detail-badge__name">+{overflow.length}</span>
+              <span className="detail-badge__caret" aria-hidden="true">▾</span>
+            </button>
+            {menuPos
+              ? createPortal(
+                  <div
+                    ref={menuRef}
+                    className="detail-badges__menu"
+                    role="menu"
+                    style={{ left: menuPos.left, maxHeight: menuPos.maxHeight, top: menuPos.top }}
+                    onKeyDown={onMenuKeyDown}
+                  >
+                    {overflow.map((detail) => (
+                      <button
+                        key={detail.name}
+                        aria-checked={detail.name === activeDetail}
+                        className={`detail-badges__menu-item ${detail.name === activeDetail ? 'is-active' : ''}`}
+                        role="menuitemradio"
+                        tabIndex={-1}
+                        type="button"
+                        onClick={() => {
+                          onToggle(detail.name)
+                          closeMenu(true)
+                        }}
+                      >
+                        <span className="detail-badges__menu-name">{detail.name}</span>
+                        <span className="detail-badges__menu-share">{detail.share}%</span>
+                      </button>
+                    ))}
+                  </div>,
+                  document.body,
+                )
+              : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
   )
 }
 
@@ -366,18 +627,13 @@ export function DetailPanel({
             <span className="detail-badges__label">
               {direction === 'up' ? 'Drivers' : 'Largest declines'}
             </span>
-            <div className="detail-badges__row">
-              {details.map((detail) => (
-                <DetailBadge
-                  key={detail.name}
-                  detail={detail}
-                  direction={direction}
-                  isActive={detail.name === activeDetail}
-                  maxShare={maxShare}
-                  onToggle={toggleDetail}
-                />
-              ))}
-            </div>
+            <DetailBadgeRow
+              activeDetail={activeDetail}
+              details={details}
+              direction={direction}
+              maxShare={maxShare}
+              onToggle={toggleDetail}
+            />
           </div>
         ) : null}
 
