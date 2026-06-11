@@ -1145,6 +1145,11 @@ button {
   pointer-events: none;
 }
 
+/* When there's no room above the chip, the tooltip opens downward instead. */
+.detail-tip--below {
+  transform: none;
+}
+
 .detail-tip__name {
   color: var(--text);
   font-family: var(--sans);

@@ -112,9 +112,20 @@ function MetricCard({
 // A floating tooltip portaled to <body> so it escapes the detail panel's scroll
 // clipping and any framer-motion transform context. Carries the full descriptor name
 // (chips truncate) plus the numbers and share that no longer crowd the chip face.
-function DetailTip({ meta, name, pos }: { meta: string; name: string; pos: { left: number; top: number } }) {
+function DetailTip({
+  meta,
+  name,
+  pos,
+}: {
+  meta: string
+  name: string
+  pos: { below: boolean; left: number; top: number }
+}) {
   return createPortal(
-    <div className="detail-tip" style={{ left: pos.left, top: pos.top }}>
+    <div
+      className={`detail-tip ${pos.below ? 'detail-tip--below' : ''}`}
+      style={{ left: pos.left, top: pos.top }}
+    >
       <span className="detail-tip__name">{name}</span>
       <span className="detail-tip__meta">{meta}</span>
     </div>,
@@ -138,7 +149,7 @@ function DetailBadge({
   maxShare: number
   onToggle: (name: string) => void
 }) {
-  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null)
+  const [tipPos, setTipPos] = useState<{ below: boolean; left: number; top: number } | null>(null)
   const weight = maxShare > 0 ? Math.min(1, detail.share / maxShare) : 0
   const accent =
     direction === 'up'
@@ -148,7 +159,14 @@ function DetailBadge({
 
   const showTip = (event: React.SyntheticEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect()
-    setTipPos({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 296)), top: rect.top - 8 })
+    // Flip below the chip when there isn't room for the tooltip above it (drivers row
+    // can sit near the top of the viewport), so it never clips off the top edge.
+    const below = rect.top < 120
+    setTipPos({
+      below,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 296)),
+      top: below ? rect.bottom + 8 : rect.top - 8,
+    })
   }
 
   return (
