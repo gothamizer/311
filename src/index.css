@@ -1029,11 +1029,15 @@ button {
   min-width: 0;
 }
 
-/* Container for the fit-and-overflow chip row. */
+/* Container for the fit-and-overflow chip row. overflow:hidden keeps the absolutely
+   positioned measurement layer (which lays every chip out in one un-wrapped row) from
+   widening the panel and triggering horizontal scroll; getBoundingClientRect still
+   reports true chip widths through the clip, so the fit math is unaffected. */
 .detail-badges__wrap {
   position: relative;
   flex: 1 1 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 /* The visible row stays on one line; chips that don't fit fold into "Other". */
