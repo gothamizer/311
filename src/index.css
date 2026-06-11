@@ -1010,16 +1010,13 @@ button {
 .detail-badges__baseline {
   flex: none;
   align-self: center;
+  margin-left: auto;
   max-width: 5.75rem;
   text-align: right;
   color: var(--text-dim);
   font-size: 0.62rem;
   line-height: 1.12;
   letter-spacing: 0.03em;
-}
-
-.detail-badges__baseline--solo {
-  margin-left: auto;
 }
 
 .detail-badges__row {
@@ -1190,7 +1187,7 @@ button {
 }
 
 .detail-badge__name {
-  max-width: 15rem;
+  max-width: 9rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
