@@ -598,12 +598,17 @@ button {
   color: var(--alert-strong);
 }
 
+/* The baseline note sits inline beside the figures (bottom-aligned to them) and
+   wraps within a narrow column rather than claiming its own full-width row, so the
+   metric strip never grows taller than the title/summary copy next to it. */
 .detail-panel__metric-caption {
-  flex-basis: 100%;
+  align-self: flex-end;
+  max-width: 6.5rem;
   margin: 0;
   text-align: right;
   color: var(--text-dim);
   font-size: 0.62rem;
+  line-height: 1.12;
   letter-spacing: 0.03em;
 }
 
