@@ -1001,6 +1001,9 @@ button {
   align-items: center;
   flex-wrap: nowrap;
   gap: 0.5rem;
+  /* The row is a thin strip; trim the inherited panel gap above and below it so it
+     doesn't float in too much air. */
+  margin-block: -0.32rem;
 }
 
 /* Baseline note ("vs prior weeks") rides directly after the drivers (so they use all
