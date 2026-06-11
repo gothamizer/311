@@ -1010,7 +1010,8 @@ button {
    right-aligned under the std-dev column. */
 .detail-badges__baseline {
   flex: none;
-  align-self: center;
+  align-self: flex-start;
+  margin-top: -0.22rem;
   margin-left: auto;
   max-width: 5.75rem;
   text-align: right;
