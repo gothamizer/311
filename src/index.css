@@ -114,8 +114,8 @@ button {
 .worklist-pane__header {
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
-  padding: 0.82rem 0.95rem 0.8rem;
+  gap: 0.5rem;
+  padding: 0.82rem 0.95rem 0.5rem;
   border-bottom: 1px solid var(--line);
 }
 
@@ -598,20 +598,6 @@ button {
   color: var(--alert-strong);
 }
 
-/* The baseline note sits inline beside the figures (bottom-aligned to them) and
-   wraps within a narrow column rather than claiming its own full-width row, so the
-   metric strip never grows taller than the title/summary copy next to it. */
-.detail-panel__metric-caption {
-  align-self: flex-end;
-  max-width: 6.5rem;
-  margin: 0;
-  text-align: right;
-  color: var(--text-dim);
-  font-size: 0.62rem;
-  line-height: 1.12;
-  letter-spacing: 0.03em;
-}
-
 .metric-figure {
   margin: 0;
   font-family: var(--display);
@@ -1013,12 +999,32 @@ button {
 .detail-badges {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem 0.85rem;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+}
+
+/* Baseline note ("vs prior weeks") rides directly after the drivers (so they use all
+   the room and it isn't stranded at the far edge), wrapping to two lines within a
+   narrow box that fits inside the row's height. The --solo case (no drivers) keeps it
+   right-aligned under the std-dev column. */
+.detail-badges__baseline {
+  flex: none;
+  align-self: center;
+  max-width: 5.75rem;
+  text-align: right;
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  line-height: 1.12;
+  letter-spacing: 0.03em;
+}
+
+.detail-badges__baseline--solo {
+  margin-left: auto;
 }
 
 .detail-badges__row {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.34rem;
   min-width: 0;
@@ -1259,8 +1265,7 @@ button {
     justify-self: start;
   }
 
-  .detail-panel__metric-card,
-  .detail-panel__metric-caption {
+  .detail-panel__metric-card {
     text-align: left;
   }
 }

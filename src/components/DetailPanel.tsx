@@ -178,12 +178,14 @@ function DetailBadge({
 // the fit can be recomputed on resize without affecting layout.
 function DetailBadgeRow({
   activeDetail,
+  baseline,
   details,
   direction,
   maxShare,
   onToggle,
 }: {
   activeDetail: string | undefined
+  baseline: string | null
   details: AlertDetail[]
   direction: Direction
   maxShare: number
@@ -239,15 +241,18 @@ function DetailBadgeRow({
     }
 
     const recompute = () => {
-      const available = wrap.clientWidth
-      if (!available) {
+      const rawAvailable = wrap.clientWidth
+      if (!rawAvailable) {
         return
       }
       const nodes = Array.from(measure.children) as HTMLElement[]
-      const otherNode = nodes[nodes.length - 1]
       const chipNodes = nodes.slice(0, details.length)
+      const otherNode = nodes[details.length]
       const gap = parseFloat(getComputedStyle(measure).columnGap || '0') || 0
       const widthOf = (node: HTMLElement) => node.getBoundingClientRect().width
+      // The baseline note shares the row, so carve out its width before fitting chips.
+      const baselineWidth = baseline ? widthOf(nodes[details.length + 1]) : 0
+      const available = rawAvailable - (baselineWidth ? baselineWidth + gap : 0)
 
       let total = 0
       chipNodes.forEach((node, index) => {
@@ -275,8 +280,24 @@ function DetailBadgeRow({
     recompute()
     const observer = new ResizeObserver(recompute)
     observer.observe(wrap)
-    return () => observer.disconnect()
-  }, [details])
+    // The first measurement can run before IBM Plex replaces the fallback font (which
+    // shifts chip widths) and before layout fully settles. Without these the count can
+    // stick at a stale, too-narrow value — showing "+N" with plenty of empty room.
+    const raf = requestAnimationFrame(recompute)
+    let cancelled = false
+    document.fonts?.ready
+      .then(() => {
+        if (!cancelled) {
+          recompute()
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      observer.disconnect()
+    }
+  }, [baseline, details])
 
   useEffect(() => {
     if (!menuOpen) {
@@ -323,6 +344,7 @@ function DetailBadgeRow({
           <span className="detail-badge__name">+99</span>
           <span className="detail-badge__caret" aria-hidden="true">▾</span>
         </span>
+        {baseline ? <span className="detail-badges__baseline">{baseline}</span> : null}
       </div>
 
       <div className="detail-badges__row detail-badges__row--live">
@@ -399,6 +421,7 @@ function DetailBadgeRow({
               : null}
           </div>
         ) : null}
+        {baseline ? <span className="detail-badges__baseline">{baseline}</span> : null}
       </div>
     </div>
   )
@@ -519,6 +542,11 @@ export function DetailPanel({
     }
   }, [activeDetailRecord, selection])
 
+  // The baseline note ("vs prior weeks") rides the drivers row, right-aligned under
+  // the std-dev column, instead of claiming its own line in the metric strip.
+  const baselineCaption =
+    selection.kind === 'alert' && headlineMetrics ? headlineMetrics.baselineLabel : null
+
   return (
     <AnimatePresence mode="wait">
       <motion.section
@@ -597,7 +625,6 @@ export function DetailPanel({
                   title={`Standard deviations from the baseline (${headlineMetrics.baselineLabel})`}
                   value={formatSigma(headlineMetrics.sigma)}
                 />
-                <p className="detail-panel__metric-caption">{headlineMetrics.baselineLabel}</p>
               </>
             ) : selection.kind === 'entity' ? (
               <>
@@ -622,18 +649,27 @@ export function DetailPanel({
           </div>
         </div>
 
-        {details.length ? (
+        {details.length || baselineCaption ? (
           <div className="detail-badges">
-            <span className="detail-badges__label">
-              {direction === 'up' ? 'Drivers' : 'Largest declines'}
-            </span>
-            <DetailBadgeRow
-              activeDetail={activeDetail}
-              details={details}
-              direction={direction}
-              maxShare={maxShare}
-              onToggle={toggleDetail}
-            />
+            {details.length ? (
+              <>
+                <span className="detail-badges__label">
+                  {direction === 'up' ? 'Drivers' : 'Largest declines'}
+                </span>
+                <DetailBadgeRow
+                  activeDetail={activeDetail}
+                  baseline={baselineCaption}
+                  details={details}
+                  direction={direction}
+                  maxShare={maxShare}
+                  onToggle={toggleDetail}
+                />
+              </>
+            ) : baselineCaption ? (
+              <span className="detail-badges__baseline detail-badges__baseline--solo">
+                {baselineCaption}
+              </span>
+            ) : null}
           </div>
         ) : null}
 
