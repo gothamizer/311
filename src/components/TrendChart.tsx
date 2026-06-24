@@ -64,10 +64,6 @@ function parseDate(value: string) {
   return new Date(`${value}T12:00:00`)
 }
 
-function toIsoDate(value: Date) {
-  return value.toISOString().slice(0, 10)
-}
-
 function toPeriodPoint(point: DailyPoint): PeriodPoint {
   return {
     actual: point.actual,
@@ -78,6 +74,50 @@ function toPeriodPoint(point: DailyPoint): PeriodPoint {
 
 function monthKey(value: string) {
   return value.slice(0, 7)
+}
+
+function dateKeyFromParts(year: number, monthIndex: number, day: number) {
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function toLocalDateKey(value: Date) {
+  return dateKeyFromParts(value.getFullYear(), value.getMonth(), value.getDate())
+}
+
+function addDaysToDateKey(value: string, days: number) {
+  const date = parseDate(value)
+  date.setDate(date.getDate() + days)
+  return toLocalDateKey(date)
+}
+
+function shiftYearDateKey(value: string, yearsBack: number) {
+  const date = parseDate(value)
+  const month = date.getMonth()
+  date.setFullYear(date.getFullYear() - yearsBack)
+
+  if (date.getMonth() !== month) {
+    date.setDate(0)
+  }
+
+  return toLocalDateKey(date)
+}
+
+function periodStartKey(value: string, horizon: 'quarter' | 'year') {
+  const date = parseDate(value)
+  const month = horizon === 'quarter'
+    ? Math.floor(date.getMonth() / 3) * 3
+    : 0
+
+  return dateKeyFromParts(date.getFullYear(), month, 1)
+}
+
+function periodEndKey(startKey: string, horizon: 'quarter' | 'year') {
+  const start = parseDate(startKey)
+  const end = horizon === 'quarter'
+    ? new Date(start.getFullYear(), start.getMonth() + 3, 0)
+    : new Date(start.getFullYear(), 11, 31)
+
+  return toLocalDateKey(end)
 }
 
 function aggregateMonthly(points: PeriodPoint[]) {
@@ -115,18 +155,22 @@ function sliceCurrentPeriod(points: DailyPoint[], horizon: Exclude<ChartHorizon,
     return points.slice(-7).map(toPeriodPoint)
   }
 
-  if (horizon === 'year') {
-    return aggregateMonthly(points.map(toPeriodPoint)).slice(-12)
+  if (horizon === '30d') {
+    return points.slice(-30).map(toPeriodPoint)
   }
 
-  const trailingDays =
-    horizon === '30d'
-      ? 30
-      : horizon === 'quarter'
-        ? 90
-        : 365
+  const latest = points.at(-1)
 
-  return points.slice(-trailingDays).map(toPeriodPoint)
+  if (!latest) {
+    return []
+  }
+
+  const startKey = periodStartKey(latest.date, horizon)
+  const periodPoints = points
+    .filter((point) => point.date >= startKey)
+    .map(toPeriodPoint)
+
+  return horizon === 'year' ? aggregateMonthly(periodPoints) : periodPoints
 }
 
 function previousWeekSets(points: DailyPoint[], currentRows: PeriodPoint[]) {
@@ -173,28 +217,75 @@ function previousTrailingWindowSets(points: DailyPoint[], currentRows: PeriodPoi
   })
 }
 
-function previousCalendarYearSets(points: DailyPoint[], finalDate: Date, currentLength: number) {
-  const monthlyPoints = aggregateMonthly(points.map(toPeriodPoint))
-  const currentMonthKey = monthKey(finalDate.toISOString().slice(0, 10))
-  const currentEndIndex = monthlyPoints.findLastIndex((point) => monthKey(point.date) === currentMonthKey)
-  const safeEndIndex = currentEndIndex >= 0 ? currentEndIndex : monthlyPoints.length - 1
+function previousPeriodToDateSets(
+  points: DailyPoint[],
+  horizon: 'quarter' | 'year',
+  currentRows: PeriodPoint[],
+) {
+  if (!currentRows.length) {
+    return []
+  }
 
-  return [1, 2, 3].flatMap((offset) => {
-    const endIndex = safeEndIndex - currentLength * offset
-    const startIndex = endIndex - currentLength + 1
+  if (horizon === 'year') {
+    const latest = points.at(-1)
 
-    if (startIndex < 0 || endIndex < 0) {
+    if (!latest) {
       return []
     }
 
-    const rows = monthlyPoints.slice(startIndex, endIndex + 1)
+    const byDate = new Map(points.map((point) => [point.date, toPeriodPoint(point)]))
+    const currentStart = periodStartKey(latest.date, 'year')
+    const currentLength = points.filter((point) => point.date >= currentStart).length
 
-    if (rows.length !== currentLength) {
+    return [1, 2, 3].flatMap((offset) => {
+      const priorStart = shiftYearDateKey(currentStart, offset)
+      const priorEnd = addDaysToDateKey(priorStart, currentLength - 1)
+      const priorPeriodEnd = periodEndKey(priorStart, 'year')
+
+      if (priorEnd > priorPeriodEnd) {
+        return []
+      }
+
+      const dailyRows = Array.from({ length: currentLength }).flatMap((_value, index) => {
+        const match = byDate.get(addDaysToDateKey(priorStart, index))
+        return match ? [match] : []
+      })
+      const rows = aggregateMonthly(dailyRows)
+
+      if (rows.length !== currentRows.length) {
+        return []
+      }
+
+      return {
+        label: offset === 1 ? 'Prev year' : `${offset}y ago`,
+        rows,
+      }
+    })
+  }
+
+  const byDate = new Map(points.map((point) => [point.date, toPeriodPoint(point)]))
+  const currentStart = currentRows[0].date
+
+  return [1, 2, 3].flatMap((offset) => {
+    const priorStart = shiftYearDateKey(currentStart, offset)
+    const priorEnd = addDaysToDateKey(priorStart, currentRows.length - 1)
+    const priorPeriodEnd = periodEndKey(priorStart, 'quarter')
+
+    if (priorEnd > priorPeriodEnd) {
+      return []
+    }
+
+    const rows = currentRows.flatMap((_point, index) => {
+      const match = byDate.get(addDaysToDateKey(priorStart, index))
+      return match ? [match] : []
+    })
+
+    if (rows.length !== currentRows.length) {
       return []
     }
 
     return {
-      label: offset === 1 ? 'Prev Year' : `${offset}x Year ago`,
+      label: offset === 1 ? 'Prev year' : `${offset}y ago`,
       rows,
     }
   })
@@ -205,9 +296,6 @@ function previousComparableSets(
   horizon: Exclude<ChartHorizon, 'full'>,
   currentRows: PeriodPoint[],
 ) {
-  const finalDate = parseDate(points.at(-1)?.date ?? toIsoDate(new Date()))
-  const currentLength = currentRows.length
-
   if (horizon === '7d') {
     return previousWeekSets(points, currentRows)
   }
@@ -217,10 +305,10 @@ function previousComparableSets(
   }
 
   if (horizon === 'quarter') {
-    return previousTrailingWindowSets(points, currentRows, 'Quarter')
+    return previousPeriodToDateSets(points, horizon, currentRows)
   }
 
-  return previousCalendarYearSets(points, finalDate, currentLength)
+  return previousPeriodToDateSets(points, horizon, currentRows)
 }
 
 function currentPeriodChart(

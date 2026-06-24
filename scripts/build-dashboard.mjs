@@ -49,6 +49,9 @@ const HORIZON_MINIMUMS = {
   year: { deltaPct: 8, diff: 80, volume: 120 },
 }
 const HORIZONS = ['today', '7d', '30d', 'quarter', 'year']
+const EWMA_LEVEL_ALPHA = 0.14
+const EWMA_LEVEL_RETAIN = 1 - EWMA_LEVEL_ALPHA
+const SEASONAL_HOLDOUT_DAYS = 30
 const BOROUGH_META = [
   { boardCount: 12, codePrefix: '1', id: 'manhattan', label: 'Manhattan', shortLabel: 'Manhattan' },
   { boardCount: 12, codePrefix: '2', id: 'bronx', label: 'Bronx', shortLabel: 'Bronx' },
@@ -787,11 +790,12 @@ function evaluateSeries(series, options) {
   const meanDaily = sumArray(comparableCounts) / Math.max(1, comparableDays)
   const zeroRate = comparableCounts.filter((value) => value === 0).length / Math.max(1, comparableDays)
   const sparse = comparableDays < 56 || zeroRate > 0.6 || meanDaily < 1
-  const expected = buildExpectedSeries(counts, comparableStartIndex)
+  const expectedModel = buildExpectedModel(counts, comparableStartIndex)
+  const expected = expectedModel.expected
   const dailyStd = counts.map((value, index) => (value - expected[index]) / Math.sqrt(expected[index] + 1))
   const todaySignal = buildWindowSignalFromCounts(counts, expected, 1, comparableStartIndex)
-  const sevenDaySignal = buildWindowSignalFromCounts(counts, expected, 7, comparableStartIndex)
-  const thirtyDaySignal = buildWindowSignalFromCounts(counts, expected, 30, comparableStartIndex)
+  const sevenDaySignal = buildBlockedWindowSignalFromCounts(counts, expectedModel, 7, comparableStartIndex)
+  const thirtyDaySignal = buildBlockedWindowSignalFromCounts(counts, expectedModel, 30, comparableStartIndex)
   const quarterSignal = buildPeriodSignal(counts, expected, 'quarter', comparableStartIndex)
   const yearSignal = buildPeriodSignal(counts, expected, 'year', comparableStartIndex)
 
@@ -1058,24 +1062,41 @@ function detectComparableStart(counts) {
 }
 
 function buildExpectedSeries(counts, comparableStartIndex) {
+  return buildExpectedModel(counts, comparableStartIndex).expected
+}
+
+function buildExpectedModel(counts, comparableStartIndex) {
   const expected = new Float64Array(counts.length)
+  const levelBefore = new Float64Array(counts.length)
   const comparableCounts = counts.slice(comparableStartIndex)
   const logComparableCounts = comparableCounts.map((value) => Math.log1p(value))
   const overallMedian = median(logComparableCounts)
+  const seasonalFitEndIndex = Math.max(
+    comparableStartIndex,
+    counts.length - SEASONAL_HOLDOUT_DAYS,
+  )
+  const seasonalFitDays = seasonalFitEndIndex - comparableStartIndex
+  const seasonalFitValues = []
   const weeklyFactors = new Array(7).fill(0)
   const monthlyFactors = new Array(12).fill(0)
 
-  if (comparableCounts.length >= 84) {
+  for (let index = comparableStartIndex; index < seasonalFitEndIndex; index += 1) {
+    seasonalFitValues.push(Math.log1p(counts[index]))
+  }
+
+  const seasonalCenter = seasonalFitValues.length ? median(seasonalFitValues) : overallMedian
+
+  if (seasonalFitDays >= 84) {
     for (let weekday = 0; weekday < 7; weekday += 1) {
       const values = []
 
-      for (let index = comparableStartIndex; index < counts.length; index += 1) {
+      for (let index = comparableStartIndex; index < seasonalFitEndIndex; index += 1) {
         if (getWeekday(index) === weekday) {
           values.push(Math.log1p(counts[index]))
         }
       }
 
-      weeklyFactors[weekday] = median(values) - overallMedian
+      weeklyFactors[weekday] = values.length ? median(values) - seasonalCenter : 0
     }
 
     const weeklySpread = Math.max(...weeklyFactors) - Math.min(...weeklyFactors)
@@ -1085,23 +1106,25 @@ function buildExpectedSeries(counts, comparableStartIndex) {
     }
   }
 
-  if (comparableCounts.length >= 730) {
+  if (seasonalFitDays >= 730) {
     for (let month = 0; month < 12; month += 1) {
       const values = []
 
-      for (let index = comparableStartIndex; index < counts.length; index += 1) {
+      for (let index = comparableStartIndex; index < seasonalFitEndIndex; index += 1) {
         if (getMonth(index) === month) {
           values.push(Math.log1p(counts[index]))
         }
       }
 
-      monthlyFactors[month] = median(values) - overallMedian
+      monthlyFactors[month] = values.length ? median(values) - seasonalCenter : 0
     }
   }
 
   let level = overallMedian
 
   for (let index = 0; index < counts.length; index += 1) {
+    levelBefore[index] = level
+
     if (index < comparableStartIndex) {
       expected[index] = counts[index]
       continue
@@ -1111,10 +1134,15 @@ function buildExpectedSeries(counts, comparableStartIndex) {
     expected[index] = Math.max(0, Math.expm1(level + seasonal))
     const adjusted = Math.log1p(counts[index]) - seasonal
     const bounded = clamp(adjusted, level - 2.5, level + 2.5)
-    level = 0.14 * bounded + 0.86 * level
+    level = EWMA_LEVEL_ALPHA * bounded + EWMA_LEVEL_RETAIN * level
   }
 
-  return Array.from(expected, (value) => round2(value))
+  return {
+    expected: Array.from(expected, (value) => round2(value)),
+    levelBefore: Array.from(levelBefore),
+    monthlyFactors,
+    weeklyFactors,
+  }
 }
 
 function buildWindowSignalFromCounts(counts, expected, windowSize, comparableStartIndex) {
@@ -1155,6 +1183,92 @@ function buildWindowSignalFromCounts(counts, expected, windowSize, comparableSta
     raw: latest.raw,
     score,
   }
+}
+
+function buildBlockedWindowSignalFromCounts(counts, expectedModel, windowSize, comparableStartIndex) {
+  const standardized = []
+
+  for (let endIndex = comparableStartIndex + windowSize - 1; endIndex < counts.length; endIndex += 1) {
+    const startIndex = endIndex - windowSize + 1
+    const actual = sumRange(counts, startIndex, endIndex)
+    const expectedValue = round4(blockedWindowExpectedValue(expectedModel, startIndex, endIndex))
+
+    standardized.push({
+      actual,
+      expected: expectedValue,
+      raw: (actual - expectedValue) / Math.sqrt(expectedValue + 1),
+    })
+  }
+
+  if (standardized.length === 0) {
+    return {
+      actual: 0,
+      comparisonCount: 0,
+      expected: 0,
+      expectedSeries: expectedModel.expected,
+      percentileScore: 0,
+      projectedPercentile: 50,
+      raw: 0,
+      score: 0,
+    }
+  }
+
+  const latest = standardized.at(-1)
+  const history = standardized.slice(0, -1).map((entry) => entry.raw)
+  const score = robustScore(latest.raw, history)
+  const endIndex = counts.length - 1
+  const startIndex = endIndex - windowSize + 1
+
+  return {
+    actual: latest.actual,
+    comparisonCount: history.length,
+    expected: latest.expected,
+    expectedSeries: buildBlockedWindowExpectedSeries(
+      expectedModel.expected,
+      expectedModel,
+      startIndex,
+      endIndex,
+      latest.expected,
+    ),
+    percentileScore: 0,
+    projectedPercentile: 50,
+    raw: latest.raw,
+    score,
+  }
+}
+
+function buildBlockedWindowExpectedSeries(baseExpected, expectedModel, startIndex, endIndex, expectedTotal) {
+  const nextExpected = [...baseExpected]
+  const level = expectedModel.levelBefore[startIndex] ?? 0
+  let assignedTotal = 0
+
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    const value = round4(forecastFromLevel(expectedModel, level, index))
+    nextExpected[index] = value
+    assignedTotal += value
+  }
+
+  if (endIndex >= startIndex) {
+    nextExpected[endIndex] = Math.max(0, round4(nextExpected[endIndex] + expectedTotal - assignedTotal))
+  }
+
+  return nextExpected
+}
+
+function blockedWindowExpectedValue(expectedModel, startIndex, endIndex) {
+  const level = expectedModel.levelBefore[startIndex] ?? 0
+  let expectedValue = 0
+
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    expectedValue += forecastFromLevel(expectedModel, level, index)
+  }
+
+  return expectedValue
+}
+
+function forecastFromLevel(expectedModel, level, index) {
+  const seasonal = expectedModel.weeklyFactors[getWeekday(index)] + expectedModel.monthlyFactors[getMonth(index)]
+  return Math.max(0, Math.expm1(level + seasonal))
 }
 
 function buildWindowSignal(dailyStd, windowSize, comparableStartIndex) {
@@ -1230,9 +1344,11 @@ function buildPeriodSignal(counts, expected, periodType, comparableStartIndex) {
     const comparableExpected = sumRange(expected, periodStartIndex, priorProgressEndIndex)
     const fullActual = sumRange(counts, periodStartIndex, priorPeriodEndIndex)
     const fullExpected = sumRange(expected, periodStartIndex, priorPeriodEndIndex)
+    const dailyActuals = counts.slice(periodStartIndex, priorProgressEndIndex + 1)
 
     comparablePeriods.push({
       actual: comparableActual,
+      dailyActuals,
       expected: comparableExpected,
       fullActual,
       fullExpected,
@@ -1242,6 +1358,7 @@ function buildPeriodSignal(counts, expected, periodType, comparableStartIndex) {
   const comparableActuals = comparablePeriods.map((period) => period.actual)
   const aggregateBaseline = buildAggregatePeriodBaseline([...comparableActuals].reverse())
   const expectedValue = aggregateBaseline.expected
+  const displayedExpectedValue = round4(expectedValue)
   const raw = (actual - expectedValue) / Math.sqrt(expectedValue + 1)
   const residual = actual - expectedValue
   const residualScale = buildAggregateResidualScale(aggregateBaseline.residuals, expectedValue)
@@ -1250,13 +1367,13 @@ function buildPeriodSignal(counts, expected, periodType, comparableStartIndex) {
   const percentileScore = comparablePeriods.length >= minimumProjectedComparisons(periodType)
     ? percentileExtremeness(projectedPercentile)
     : 0
-  const expectedSeries = buildAggregateExpectedSeries(expected, startIndex, endIndex, expectedValue)
+  const expectedSeries = buildPriorPeriodExpectedSeries(expected, startIndex, endIndex, displayedExpectedValue, comparablePeriods)
   const score = residualScore
 
   return {
     actual,
     comparisonCount: comparablePeriods.length,
-    expected: expectedValue,
+    expected: displayedExpectedValue,
     expectedSeries,
     percentileScore,
     projectedPercentile,
@@ -1327,17 +1444,51 @@ function buildAggregateResidualScale(residuals, expectedValue) {
   return Math.max(1, residualScale, poissonScale, practicalScale)
 }
 
-function buildAggregateExpectedSeries(baseExpected, startIndex, endIndex, expectedTotal) {
+function buildPriorPeriodExpectedSeries(baseExpected, startIndex, endIndex, expectedTotal, comparablePeriods) {
   const nextExpected = [...baseExpected]
-  const baseTotal = sumRange(baseExpected, startIndex, endIndex)
   const windowLength = endIndex - startIndex + 1
+  const shareSamples = Array.from({ length: windowLength }, () => [])
+  const aggregateActuals = new Array(windowLength).fill(0)
+  let aggregateTotal = 0
+
+  for (const period of comparablePeriods) {
+    const periodTotal = sumArray(period.dailyActuals)
+
+    if (periodTotal <= 0) {
+      continue
+    }
+
+    for (let offset = 0; offset < windowLength; offset += 1) {
+      const value = period.dailyActuals[offset] ?? 0
+      shareSamples[offset].push(value / periodTotal)
+      aggregateActuals[offset] += value
+      aggregateTotal += value
+    }
+  }
+
+  let shares = shareSamples.map((samples) => samples.length ? median(samples) : 0)
+  let shareTotal = sumArray(shares)
+
+  if (shareTotal <= 0 && aggregateTotal > 0) {
+    shares = aggregateActuals.map((value) => value / aggregateTotal)
+    shareTotal = sumArray(shares)
+  }
+
+  let assignedTotal = 0
 
   for (let index = startIndex; index <= endIndex; index += 1) {
-    const share = baseTotal > 0
-      ? baseExpected[index] / baseTotal
+    const offset = index - startIndex
+    const share = shareTotal > 0
+      ? shares[offset] / shareTotal
       : 1 / Math.max(1, windowLength)
+    const value = round4(expectedTotal * share)
 
-    nextExpected[index] = expectedTotal * share
+    nextExpected[index] = value
+    assignedTotal += value
+  }
+
+  if (endIndex >= startIndex) {
+    nextExpected[endIndex] = Math.max(0, round4(nextExpected[endIndex] + expectedTotal - assignedTotal))
   }
 
   return nextExpected
@@ -1884,7 +2035,7 @@ function buildTimeline(counts, expected) {
     points.push({
       actual: roundCount(counts[index]),
       date: DATE_KEYS[index],
-      expected: roundCount(expected[index]),
+      expected: round4(expected[index]),
     })
   }
 
